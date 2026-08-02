@@ -1,0 +1,52 @@
+# Godot 4.2+ generated files
+~*.dll
+
+# Godot import cache and editor-generated state
+.godot/
+.import/
+.nomedia
+
+# Godot-generated local/export files
+export.cfg
+export_credentials.cfg
+*.tmp
+
+# Imported translations generated from CSV source files
+*.translation
+
+# Godot C# / Mono generated files
+.mono/
+data_*/
+mono_crash.*.json
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Local editor files
+.vscode/
+.idea/
+*.code-workspace
+*.swp
+*.swo
+*~
+
+# Operating-system metadata
+.DS_Store
+Thumbs.db
+
+# Runtime logs and crash output
+*.log
+crash*.txt
+
+# Python caches, if bridge/helper scripts are added
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Keep Godot .uid files tracked; they preserve resource identity.
