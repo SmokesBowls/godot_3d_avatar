@@ -1,0 +1,123 @@
+[gd_scene load_steps=2 format=3 uid="uid://b1d6x8o7v851u"]
+
+[ext_resource type="Script" path="res://addons/godot_ollama_task_performer/assist_dock.gd" id="1_x"]
+
+[node name="AssistDock" type="Control"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("1_x")
+
+[node name="Scroll" type="ScrollContainer" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="Margin" type="MarginContainer" parent="Scroll"]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+theme_override_constants/margin_left = 10
+theme_override_constants/margin_top = 10
+theme_override_constants/margin_right = 10
+theme_override_constants/margin_bottom = 10
+
+[node name="VBox" type="VBoxContainer" parent="Scroll/Margin"]
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_constants/separation = 8
+
+[node name="Title" type="Label" parent="Scroll/Margin/VBox"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 16
+text = "Ollama Task Performer"
+horizontal_alignment = 1
+
+[node name="Separator" type="HSeparator" parent="Scroll/Margin/VBox"]
+layout_mode = 2
+
+[node name="TaskLabel" type="Label" parent="Scroll/Margin/VBox"]
+layout_mode = 2
+text = "Task Input:"
+
+[node name="TaskInput" type="TextEdit" parent="Scroll/Margin/VBox"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 80)
+layout_mode = 2
+placeholder_text = "e.g., Inspect the open scene."
+wrap_mode = 1
+
+[node name="Grid" type="GridContainer" parent="Scroll/Margin/VBox"]
+layout_mode = 2
+columns = 2
+
+[node name="UrlLabel" type="Label" parent="Scroll/Margin/VBox/Grid"]
+layout_mode = 2
+text = "Ollama URL: "
+
+[node name="UrlInput" type="LineEdit" parent="Scroll/Margin/VBox/Grid"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+text = "http://127.0.0.1:11434"
+
+[node name="ModelLabel" type="Label" parent="Scroll/Margin/VBox/Grid"]
+layout_mode = 2
+text = "Model: "
+
+[node name="ModelInput" type="LineEdit" parent="Scroll/Margin/VBox/Grid"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+text = "qwen2.5:7b-instruct"
+
+[node name="Separator2" type="HSeparator" parent="Scroll/Margin/VBox"]
+layout_mode = 2
+
+[node name="Buttons" type="HBoxContainer" parent="Scroll/Margin/VBox"]
+layout_mode = 2
+theme_override_constants/separation = 10
+
+[node name="RunButton" type="Button" parent="Scroll/Margin/VBox/Buttons"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Run Task"
+
+[node name="StopButton" type="Button" parent="Scroll/Margin/VBox/Buttons"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+disabled = true
+text = "Stop Scene"
+
+[node name="StatusBox" type="HBoxContainer" parent="Scroll/Margin/VBox"]
+layout_mode = 2
+
+[node name="StatusTitle" type="Label" parent="Scroll/Margin/VBox/StatusBox"]
+layout_mode = 2
+text = "Status: "
+
+[node name="StatusLabel" type="Label" parent="Scroll/Margin/VBox/StatusBox"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Ready"
+
+[node name="ResultLabel" type="Label" parent="Scroll/Margin/VBox"]
+layout_mode = 2
+text = "Result Output (JSON):"
+
+[node name="ResultOutput" type="TextEdit" parent="Scroll/Margin/VBox"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 300)
+layout_mode = 2
+size_flags_vertical = 3
+editable = false
+wrap_mode = 1
