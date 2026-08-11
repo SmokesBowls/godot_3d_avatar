@@ -1,13 +1,9 @@
-<<<<<<< HEAD
-# Godot 4+ specific ignores
-.godot/
-/android/
-=======
 # Godot 4.2+ generated files
 ~*.dll
 
 # Godot import cache and editor-generated state
 .godot/
+/android/
 .import/
 .nomedia
 
@@ -55,4 +51,7 @@ __pycache__/
 venv/
 
 # Keep Godot .uid files tracked; they preserve resource identity.
->>>>>>> 1ce93e0657c0c314bbd5527aa8a828ccb046f358
+
+# EngAIn local runtime mailboxes
+/engain_request.json
+/engain_response.json
