@@ -71,6 +71,8 @@ CAPTURE_PHASE = "pre_dispatch_player_view.v1"
 PROJECT_ID = "godot_3d_avatar"
 SCENE_PATH = "res://scenes/Main.tscn"
 DRAGON_SCENE_PATH = "res://scenes/DragonAvatar3D.tscn"
+MAILBOX_PROJECT_ROOT = Path("/mnt/data-drive/godot_engain_3d_avatar")
+REQUEST_TEMP_PATTERN = re.compile(r"^\.engain_request\.(req_[0-9a-f]{32})\.tmp$")
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 SOURCE_UNAVAILABLE_REASONS = {
     "capture_failed",
@@ -205,6 +207,314 @@ def _claim_strict_json_mailbox(path: Path, limit: int) -> str:
             except FileNotFoundError:
                 pass
         os.close(directory_descriptor)
+
+
+def _validate_session_state(value: Any) -> None:
+    expected_keys = {
+        "profile",
+        "companion_ref",
+        "provider",
+        "model",
+        "session_id",
+        "processed_request_ids",
+    }
+    if not isinstance(value, dict) or set(value) != expected_keys:
+        raise ValueError("Hermes session state keys do not match the frozen schema")
+    if (
+        value.get("profile") != HERMES_PROFILE
+        or value.get("companion_ref") != COMPANION_REF
+        or value.get("provider") != FROZEN_PROVIDER
+        or value.get("model") != FROZEN_MODEL
+        or value.get("session_id") != PERSISTED_HERMES_B_SESSION_ID
+    ):
+        raise ValueError("Hermes session state identity differs from the frozen identity")
+    processed = value.get("processed_request_ids")
+    if (
+        not isinstance(processed, list)
+        or len(processed) > MAX_PROCESSED_REQUEST_IDS
+        or any(
+            not isinstance(request_id, str)
+            or REQUEST_ID_PATTERN.fullmatch(request_id) is None
+            for request_id in processed
+        )
+        or len(set(processed)) != len(processed)
+    ):
+        raise ValueError("Hermes session state processed request IDs are invalid")
+
+
+def initialize_session_state() -> bool:
+    """Create or validate the frozen project-local identity without dispatching."""
+    if not hasattr(os, "O_DIRECTORY") or not hasattr(os, "O_NOFOLLOW"):
+        raise HermesAdapterError("descriptor-bound state initialization is unavailable")
+
+    project_root = Path(MAILBOX_PROJECT_ROOT).absolute()
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    read_flags = os.O_RDONLY | os.O_NOFOLLOW
+    if hasattr(os, "O_NOATIME"):
+        read_flags |= os.O_NOATIME
+    if hasattr(os, "O_CLOEXEC"):
+        directory_flags |= os.O_CLOEXEC
+        read_flags |= os.O_CLOEXEC
+
+    project_descriptor = os.open(project_root, directory_flags)
+    state_directory_descriptor = -1
+    state_descriptor = -1
+    temporary_descriptor = -1
+    temporary_name: str | None = None
+    temporary_status: os.stat_result | None = None
+    final_name = "engain_hermes_session.json"
+
+    def read_bounded(descriptor: int) -> bytes:
+        status = os.fstat(descriptor)
+        if not stat.S_ISREG(status.st_mode):
+            raise ValueError("Hermes session state is not a regular file")
+        if status.st_size > MAX_STATE_BYTES:
+            raise ValueError("Hermes session state exceeds the safe size limit")
+        chunks: list[bytes] = []
+        remaining = MAX_STATE_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(descriptor, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+        if len(raw) > MAX_STATE_BYTES:
+            raise ValueError("Hermes session state exceeds the safe size limit")
+        return raw
+
+    def cleanup_exact_temporary() -> None:
+        nonlocal temporary_name
+        if temporary_name is None or state_directory_descriptor < 0:
+            return
+        try:
+            current = os.stat(
+                temporary_name,
+                dir_fd=state_directory_descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            temporary_name = None
+            return
+        if temporary_status is not None and (
+            current.st_dev != temporary_status.st_dev
+            or current.st_ino != temporary_status.st_ino
+        ):
+            raise HermesAdapterError("state temporary path changed during publication")
+        os.unlink(temporary_name, dir_fd=state_directory_descriptor)
+        temporary_name = None
+        os.fsync(state_directory_descriptor)
+
+    try:
+        state_directory_descriptor = os.open(
+            ".godot",
+            directory_flags,
+            dir_fd=project_descriptor,
+        )
+        try:
+            path_status = os.stat(
+                final_name,
+                dir_fd=state_directory_descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            path_status = None
+
+        if path_status is not None:
+            if not stat.S_ISREG(path_status.st_mode):
+                raise ValueError("Hermes session state path is not a regular file")
+            state_descriptor = os.open(
+                final_name,
+                read_flags,
+                dir_fd=state_directory_descriptor,
+            )
+            descriptor_status = os.fstat(state_descriptor)
+            if (
+                not stat.S_ISREG(descriptor_status.st_mode)
+                or descriptor_status.st_dev != path_status.st_dev
+                or descriptor_status.st_ino != path_status.st_ino
+            ):
+                raise ValueError("Hermes session state identity changed during validation")
+            parsed = _strict_json_loads(read_bounded(state_descriptor).decode("utf-8"))
+            _validate_session_state(parsed)
+            return False
+
+        initial_state = {
+            "profile": HERMES_PROFILE,
+            "companion_ref": COMPANION_REF,
+            "provider": FROZEN_PROVIDER,
+            "model": FROZEN_MODEL,
+            "session_id": PERSISTED_HERMES_B_SESSION_ID,
+            "processed_request_ids": [],
+        }
+        encoded = (
+            json.dumps(
+                initial_state,
+                indent=2,
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+            + "\n"
+        ).encode("utf-8")
+        temporary_name = f".{final_name}.{secrets.token_hex(16)}.tmp"
+        temporary_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+        if hasattr(os, "O_CLOEXEC"):
+            temporary_flags |= os.O_CLOEXEC
+        temporary_descriptor = os.open(
+            temporary_name,
+            temporary_flags,
+            0o600,
+            dir_fd=state_directory_descriptor,
+        )
+        os.fchmod(temporary_descriptor, 0o600)
+        temporary_status = os.fstat(temporary_descriptor)
+        if not stat.S_ISREG(temporary_status.st_mode):
+            raise ValueError("Hermes session state temporary is not a regular file")
+        offset = 0
+        while offset < len(encoded):
+            written = os.write(temporary_descriptor, encoded[offset:])
+            if written <= 0:
+                raise OSError("short Hermes session state write")
+            offset += written
+        os.fsync(temporary_descriptor)
+        os.link(
+            temporary_name,
+            final_name,
+            src_dir_fd=state_directory_descriptor,
+            dst_dir_fd=state_directory_descriptor,
+            follow_symlinks=False,
+        )
+        os.fsync(state_directory_descriptor)
+        cleanup_exact_temporary()
+        return True
+    finally:
+        if temporary_descriptor >= 0:
+            os.close(temporary_descriptor)
+        if temporary_name is not None and state_directory_descriptor >= 0:
+            cleanup_exact_temporary()
+        if state_descriptor >= 0:
+            os.close(state_descriptor)
+        if state_directory_descriptor >= 0:
+            os.close(state_directory_descriptor)
+        os.close(project_descriptor)
+
+
+def publish_request(temporary_path: Path) -> Path:
+    """Validate and atomically publish one frozen request without dispatching it."""
+    temporary_path = Path(temporary_path)
+    project_root = Path(MAILBOX_PROJECT_ROOT).absolute()
+    if not temporary_path.is_absolute():
+        raise ValueError("request temporary path must be absolute")
+    temporary_path = temporary_path.absolute()
+    if temporary_path.parent != project_root:
+        raise ValueError("request temporary path is outside the frozen project root")
+
+    match = REQUEST_TEMP_PATTERN.fullmatch(temporary_path.name)
+    directory_descriptor = -1
+    temporary_descriptor = -1
+    temporary_status: os.stat_result | None = None
+    published = False
+
+    def cleanup_exact_temporary() -> None:
+        if directory_descriptor < 0:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return
+        try:
+            current = os.stat(
+                temporary_path.name,
+                dir_fd=directory_descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            return
+        if temporary_status is not None and (
+            current.st_dev != temporary_status.st_dev
+            or current.st_ino != temporary_status.st_ino
+        ):
+            raise HermesAdapterError("request temporary path changed during publication")
+        os.unlink(temporary_path.name, dir_fd=directory_descriptor)
+
+    try:
+        if match is None:
+            raise ValueError("request temporary basename is invalid")
+        if not hasattr(os, "O_DIRECTORY") or not hasattr(os, "O_NOFOLLOW"):
+            raise HermesAdapterError("descriptor-bound request publication is unavailable")
+
+        directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        file_flags = os.O_RDONLY | os.O_NOFOLLOW
+        if hasattr(os, "O_CLOEXEC"):
+            directory_flags |= os.O_CLOEXEC
+            file_flags |= os.O_CLOEXEC
+        directory_descriptor = os.open(project_root, directory_flags)
+
+        path_status = os.stat(
+            temporary_path.name,
+            dir_fd=directory_descriptor,
+            follow_symlinks=False,
+        )
+        temporary_status = path_status
+        if not stat.S_ISREG(path_status.st_mode):
+            raise ValueError("request temporary path is not a regular file")
+
+        temporary_descriptor = os.open(
+            temporary_path.name,
+            file_flags,
+            dir_fd=directory_descriptor,
+        )
+        descriptor_status = os.fstat(temporary_descriptor)
+        if (
+            not stat.S_ISREG(descriptor_status.st_mode)
+            or descriptor_status.st_dev != path_status.st_dev
+            or descriptor_status.st_ino != path_status.st_ino
+        ):
+            raise ValueError("request temporary file identity changed")
+        temporary_status = descriptor_status
+        if descriptor_status.st_size > MAX_REQUEST_BYTES:
+            raise ValueError("request temporary file exceeds the safe size limit")
+
+        chunks: list[bytes] = []
+        remaining = MAX_REQUEST_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(temporary_descriptor, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+        if len(raw) > MAX_REQUEST_BYTES:
+            raise ValueError("request temporary file exceeds the safe size limit")
+        payload = _strict_json_loads(raw.decode("utf-8"))
+
+        validator = HermesSessionAdapter(AdapterConfig(project_dir=project_root))
+        validated = validator._validate_request(payload)
+        filename_request_id = match.group(1)
+        if validated.request_id != filename_request_id:
+            raise ValueError("request_id does not match request temporary filename")
+
+        os.fsync(temporary_descriptor)
+        os.link(
+            f"/proc/self/fd/{temporary_descriptor}",
+            "engain_request.json",
+            dst_dir_fd=directory_descriptor,
+            follow_symlinks=True,
+        )
+        published = True
+        os.fsync(directory_descriptor)
+        cleanup_exact_temporary()
+        os.fsync(directory_descriptor)
+        return project_root / "engain_request.json"
+    except Exception:
+        if not published:
+            cleanup_exact_temporary()
+        raise
+    finally:
+        if temporary_descriptor >= 0:
+            os.close(temporary_descriptor)
+        if directory_descriptor >= 0:
+            os.close(directory_descriptor)
 
 
 def _publish_snapshot_pair(
@@ -451,6 +761,8 @@ class HermesCLIClient:
         self.session_id = session_id
         self.project_dir = project_dir.resolve() if project_dir is not None else None
         self.pending_perception: ValidatedPerception | None = None
+        self.pending_prepared_image: tuple[str, str] | None = None
+        self.pending_prepared_contract_command: tuple[str, ...] | None = None
         self.last_contract_command: list[str] | None = None
         self.last_executed_command: list[str] | None = None
         self.last_provider_returncode: int | None = None
@@ -518,10 +830,40 @@ class HermesCLIClient:
         effective_perception = (
             self.pending_perception if perception is None else perception
         )
-        command = self.build_contract_command(
+        rebuilt_command = self.build_contract_command(
             messages,
             perception=effective_perception,
         )
+
+        admitted_contract_command = self.pending_prepared_contract_command
+        self.pending_prepared_contract_command = None
+        command = (
+            list(admitted_contract_command)
+            if admitted_contract_command is not None
+            else rebuilt_command
+        )
+
+        admitted_image = self.pending_prepared_image
+        self.pending_prepared_image = None
+        if admitted_image is not None:
+            admitted_path, admitted_sha256 = admitted_image
+            if (
+                command.count("--image") != 1
+                or command[command.index("--image") + 1] != admitted_path
+            ):
+                raise HermesAdapterError(
+                    "Hermes image path differs from provider-free admission"
+                )
+            try:
+                admitted_bytes = Path(admitted_path).read_bytes()
+            except OSError as exc:
+                raise HermesAdapterError(
+                    "admitted Hermes image is no longer readable"
+                ) from exc
+            if hashlib.sha256(admitted_bytes).hexdigest() != admitted_sha256:
+                raise HermesAdapterError(
+                    "Hermes image bytes differ from provider-free admission"
+                )
 
         completed = self._run_bounded(command)
         self.last_provider_returncode = completed.returncode
@@ -848,6 +1190,167 @@ class HermesSessionAdapter:
     def _build_director_bridge(self) -> Any:
         return LocalObservationDirector(self.client)
 
+    def prepare_image_dispatch(
+        self,
+        payload: Any,
+        *,
+        dragon_scene_path: str,
+    ) -> dict[str, Any]:
+        """Validate and translate one image-bearing request without dispatching it."""
+        if dragon_scene_path != DRAGON_SCENE_PATH:
+            raise PerceptionValidationError(
+                "SCENE_IDENTITY_MISMATCH",
+                "dragon scene differs from the frozen 3D presentation",
+            )
+        if self.client.session_id != PERSISTED_HERMES_B_SESSION_ID:
+            raise HermesAdapterError(
+                "persisted Hermes B session identity is missing or mismatched"
+            )
+
+        validated = self._validate_request(payload)
+        perception = validated.perception
+        if (
+            perception.requested_state != "full"
+            or perception.effective_state != "full"
+            or not perception.viewport_image_attached
+            or perception.metadata is None
+        ):
+            raise PerceptionValidationError(
+                "UNSUPPORTED_NATIVE_IMAGE_ROUTE",
+                "image dispatch requires fully validated persisted perception",
+            )
+
+        context = cast(dict[str, Any], payload["additional_context"])
+        perception_payload = cast(dict[str, Any], context["perception"])
+        snapshot_payload = cast(dict[str, Any], perception_payload["snapshot"])
+        metadata_path = snapshot_payload["metadata_path"]
+        viewport = perception.metadata.get("viewport")
+        if not isinstance(viewport, dict):
+            raise PerceptionValidationError(
+                "METADATA_CONTENT_MISMATCH", "validated viewport metadata is missing"
+            )
+        image_path = viewport.get("image_path")
+
+        metadata_bytes, image_bytes = self._read_snapshot_evidence_pair(
+            metadata_path,
+            image_path,
+            perception.capture_id,
+        )
+        if metadata_bytes is None or image_bytes is None:
+            raise PerceptionValidationError(
+                "IMAGE_PATH_REJECTED", "validated image evidence is unavailable"
+            )
+        if hashlib.sha256(metadata_bytes).hexdigest() != perception.metadata_sha256:
+            raise PerceptionValidationError(
+                "METADATA_HASH_MISMATCH", "persisted metadata hash differs"
+            )
+        persisted_image_sha256 = hashlib.sha256(image_bytes).hexdigest()
+        if (
+            persisted_image_sha256 != perception.image_sha256
+            or persisted_image_sha256 != viewport.get("image_sha256")
+        ):
+            raise PerceptionValidationError(
+                "IMAGE_HASH_MISMATCH", "persisted image hash differs"
+            )
+        width, height = self._parse_png_dimensions(image_bytes)
+        if viewport.get("width") != width or viewport.get("height") != height:
+            raise PerceptionValidationError(
+                "IMAGE_DIMENSION_MISMATCH", "persisted image dimensions differ"
+            )
+
+        if not isinstance(image_path, str):
+            raise PerceptionValidationError(
+                "IMAGE_PATH_REJECTED", "validated image path is unavailable"
+            )
+        try:
+            snapshot_root = self.config.snapshot_root.resolve(strict=True)
+            canonical_image_path = (self.config.project_dir / image_path).resolve(
+                strict=True
+            )
+        except OSError as exc:
+            raise PerceptionValidationError(
+                "IMAGE_PATH_REJECTED", "validated image path cannot be resolved"
+            ) from exc
+        expected_image_path = snapshot_root / f"perception_{perception.capture_id}.png"
+        if (
+            canonical_image_path != expected_image_path
+            or canonical_image_path.parent != snapshot_root
+        ):
+            raise PerceptionValidationError(
+                "IMAGE_PATH_REJECTED", "canonical image path differs"
+            )
+
+        messages = LocalObservationDirector.build_messages(validated.player_input)
+        contract_argv = self.client.build_contract_command(
+            messages,
+            perception=perception,
+        )
+        executable_argv = self.client._profile_compatible_command(contract_argv)
+        for argv in (contract_argv, executable_argv):
+            if (
+                argv.count("--image") != 1
+                or argv[argv.index("--image") + 1] != str(canonical_image_path)
+            ):
+                raise HermesAdapterError(
+                    "prepared Hermes image path differs from validated evidence"
+                )
+
+        return {
+            "contract_argv": contract_argv,
+            "executable_argv": executable_argv,
+            "request_id": validated.request_id,
+            "client_request_id": validated.client_request_id,
+            "capture_id": perception.capture_id,
+            "project_id": perception.metadata["project_id"],
+            "scene_path": perception.metadata["scene_path"],
+            "dragon_scene_path": dragon_scene_path,
+            "session_id": self.client.session_id,
+            "image_path": str(canonical_image_path),
+            "image_sha256": persisted_image_sha256,
+            "width": width,
+            "height": height,
+        }
+
+    def _require_live_preparation_matches(
+        self,
+        validated: ValidatedRequest,
+        preparation: Any,
+    ) -> None:
+        """Bind provider admission to the exact already-validated live image."""
+        perception = validated.perception
+        metadata = perception.metadata
+        if not isinstance(preparation, dict) or not isinstance(metadata, dict):
+            raise PerceptionValidationError(
+                "PREPARATION_MISMATCH",
+                "live image preparation did not return a correlated object",
+            )
+        viewport = metadata.get("viewport")
+        if not isinstance(viewport, dict):
+            raise PerceptionValidationError(
+                "PREPARATION_MISMATCH",
+                "validated live perception has no viewport identity",
+            )
+        image_wire = viewport.get("image_path")
+        if not isinstance(image_wire, str):
+            raise PerceptionValidationError(
+                "PREPARATION_MISMATCH",
+                "validated live perception has no image path",
+            )
+        expected = {
+            "request_id": validated.request_id,
+            "client_request_id": validated.client_request_id,
+            "capture_id": perception.capture_id,
+            "session_id": self.client.session_id,
+            "image_path": str((self.config.project_dir / image_wire).resolve(strict=True)),
+            "image_sha256": perception.image_sha256,
+        }
+        for field, expected_value in expected.items():
+            if preparation.get(field) != expected_value:
+                raise PerceptionValidationError(
+                    "PREPARATION_MISMATCH",
+                    f"live image preparation mismatched {field}",
+                )
+
     def process_once(self) -> bool:
         if self.config.response_file.exists():
             return False
@@ -983,6 +1486,56 @@ class HermesSessionAdapter:
             return True
         self._reserve_request(request_id)
 
+        if (
+            validated.perception.requested_state == "full"
+            and validated.perception.effective_state == "full"
+        ):
+            try:
+                preparation = self.prepare_image_dispatch(
+                    payload,
+                    dragon_scene_path=DRAGON_SCENE_PATH,
+                )
+                self._require_live_preparation_matches(validated, preparation)
+                self.client.pending_prepared_image = (
+                    preparation["image_path"],
+                    preparation["image_sha256"],
+                )
+                prepared_contract_argv = preparation.get("contract_argv")
+                if not (
+                    isinstance(prepared_contract_argv, list)
+                    and prepared_contract_argv
+                    and all(isinstance(item, str) for item in prepared_contract_argv)
+                ):
+                    raise PerceptionValidationError(
+                        "PREPARATION_MISMATCH",
+                        "live image preparation returned no exact contract command",
+                    )
+                self.client.pending_prepared_contract_command = tuple(
+                    prepared_contract_argv
+                )
+            except Exception as exc:
+                safe_response = self._error_response(
+                    "Current runtime perception could not be prepared safely.",
+                    request_id,
+                    client_request_id,
+                    perception=validated.perception,
+                    failure_code=(
+                        exc.code
+                        if isinstance(exc, PerceptionValidationError)
+                        else "PREPARATION_REJECTED"
+                    ),
+                )
+                self._write_response(safe_response)
+                self._record_processed_request(request_id)
+                self._release_request_reservation(request_id)
+                detail = str(exc).replace("\n", " ")[:300]
+                print(
+                    f"Rejected live image preparation for {request_id}: {detail}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return True
+
         self.client.pending_perception = validated.perception
         try:
             response = director_bridge.process_player_input(
@@ -1011,6 +1564,8 @@ class HermesSessionAdapter:
             print(f"Hermes failure for {request_id}: {detail}", file=sys.stderr, flush=True)
         finally:
             self.client.pending_perception = None
+            self.client.pending_prepared_image = None
+            self.client.pending_prepared_contract_command = None
 
         self._write_response(safe_response)
         self._record_processed_request(request_id)
@@ -2001,6 +2556,39 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 def main(argv: Sequence[str] | None = None) -> int:
     effective_argv = list(sys.argv[1:] if argv is None else argv)
+    if effective_argv[:1] == ["--initialize-state"]:
+        if len(effective_argv) != 1:
+            print(
+                "session state initialization takes no arguments",
+                file=sys.stderr,
+                flush=True,
+            )
+            return 2
+        try:
+            created = initialize_session_state()
+        except (
+            OSError,
+            UnicodeDecodeError,
+            ValueError,
+            RecursionError,
+            HermesAdapterError,
+        ) as exc:
+            print(f"session state initialization rejected: {exc}", file=sys.stderr, flush=True)
+            return 1
+        print("ENGAIN_SESSION_STATE_READY=1", flush=True)
+        print(f"ENGAIN_SESSION_STATE_CREATED={1 if created else 0}", flush=True)
+        return 0
+    if effective_argv[:1] == ["--publish-request"]:
+        if len(effective_argv) != 2:
+            print("request publication requires exactly one path", file=sys.stderr, flush=True)
+            return 2
+        try:
+            publish_request(Path(effective_argv[1]))
+        except (OSError, UnicodeDecodeError, ValueError, HermesAdapterError) as exc:
+            print(f"request publication rejected: {exc}", file=sys.stderr, flush=True)
+            return 1
+        print("ENGAIN_REQUEST_PUBLISHED=1", flush=True)
+        return 0
     if effective_argv[:1] == ["--publish-snapshot-pair"]:
         if len(effective_argv) != 7:
             print("snapshot publication requires six arguments", file=sys.stderr, flush=True)

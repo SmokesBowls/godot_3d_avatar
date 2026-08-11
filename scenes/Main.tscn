@@ -1,12 +1,14 @@
-[gd_scene load_steps=4 format=3]
+[gd_scene load_steps=5 format=3]
 
 [ext_resource type="PackedScene" path="res://scenes/DragonAvatar3D.tscn" id="1_dragon"]
 [ext_resource type="PackedScene" path="res://scenes/ControlHUD.tscn" id="2_hud"]
+[ext_resource type="Script" path="res://scripts/Main.gd" id="3_main"]
 
 [sub_resource type="PlaneMesh" id="PlaneMesh_ground"]
 size = Vector2(20, 20)
 
 [node name="Main" type="Node3D"]
+script = ExtResource("3_main")
 
 [node name="World" type="Node3D" parent="."]
 

@@ -20,6 +20,8 @@ func _ready() -> void:
 
 	if _bridge.has_signal("log_line"):
 		_bridge.connect("log_line", Callable(self, "_on_log_line"))
+	if _bridge.has_signal("submission_committed"):
+		_bridge.connect("submission_committed", Callable(self, "_on_submission_committed"))
 
 	input.text_submitted.connect(_on_input_submitted)
 	send_btn.pressed.connect(_on_send_pressed)
@@ -30,14 +32,22 @@ func _on_input_submitted(text: String) -> void:
 	var msg := text.strip_edges()
 	if msg == "":
 		return
-	input.clear()
 	_bridge.call("submit", msg)
 
 func _on_send_pressed() -> void:
 	_bridge.call("submit", "/uplift ch22_3d_test")
 
+
+func _on_submission_committed(client_request_id: String, submitted_text: String) -> void:
+	if client_request_id.is_empty():
+		return
+	if input.text == submitted_text:
+		input.clear()
+
+
 func _on_log_line(kind: String, text: String) -> void:
 	_append(kind, text)
+
 
 func _append(kind: String, text: String) -> void:
 	var color := "white"
