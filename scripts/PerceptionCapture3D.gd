@@ -340,6 +340,11 @@ func _capture_persisted(
 	):
 		_cleanup_pair(image_absolute, metadata_absolute)
 		return _capture_failure("FINAL_CORRELATION_FAILED")
+	# Godot's JSON parser materializes every JSON number as a float. Restore the
+	# dimension fields to their frozen integer wire types before this exact
+	# persisted metadata object is forwarded through the mailbox.
+	persisted_viewport["width"] = viewport_width
+	persisted_viewport["height"] = viewport_height
 	captured_at = persisted_captured_at
 	var completed_at := Time.get_unix_time_from_system()
 	if completed_at < captured_at or completed_at - captured_at > 5.0:
