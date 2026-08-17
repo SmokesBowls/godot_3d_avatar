@@ -30,6 +30,7 @@ import time
 import unicodedata
 from typing import Any, cast, Sequence
 
+import engain_continuity_client
 import presence_authority_client
 
 # Named explicitly as temporary compatibility, per the operationalization
@@ -44,6 +45,22 @@ _PRESENCE_AUTHORITY_FAIL_OPEN_COMPAT_ENV = "ENGAIN_PRESENCE_AUTHORITY_FAIL_OPEN_
 
 def _presence_authority_fail_open_compat_enabled() -> bool:
     return os.environ.get(_PRESENCE_AUTHORITY_FAIL_OPEN_COMPAT_ENV) == "1"
+
+
+# Opt-in, default OFF: unset, this worker's dispatch is byte-for-byte what
+# it has always been (director_bridge.process_player_input straight to this
+# worker's own frozen native Hermes session). Set to "1", this worker
+# instead submits the bare player_input plus its own ProviderSessionBinding
+# fields to EngAIn's shared continuity authority (POST /dispatch — see
+# engain_continuity_client.py) and answers with whatever EngAIn returns.
+# EngAIn is never vendored into this repo for this — see that client's own
+# module docstring for why.
+_ENGAIN_CONTINUITY_DISPATCH_ENV = "ENGAIN_CONTINUITY_DISPATCH"
+_ENGAIN_ORIGIN_BODY = "dragon_3d"
+
+
+def _engain_continuity_dispatch_enabled() -> bool:
+    return os.environ.get(_ENGAIN_CONTINUITY_DISPATCH_ENV) == "1"
 
 
 SESSION_ID_PATTERN = re.compile(r"(?m)^session_id:\s*([^\s]+)\s*$")
@@ -1787,11 +1804,15 @@ class HermesSessionAdapter:
 
         self.client.pending_perception = validated.perception
         try:
-            response = director_bridge.process_player_input(
-                validated.player_input,
-                validated.game_state,
-            )
-            safe_response = self._sanitize_response(response, validated)
+            if _engain_continuity_dispatch_enabled():
+                engain_result = self._dispatch_via_engain_continuity(validated)
+                safe_response = self._engain_continuity_response(engain_result, validated)
+            else:
+                response = director_bridge.process_player_input(
+                    validated.player_input,
+                    validated.game_state,
+                )
+                safe_response = self._sanitize_response(response, validated)
         except HermesTimeoutError as exc:
             safe_response = self._error_response(
                 "Hermes timed out. The dragon is still here; please try again.",
@@ -1801,6 +1822,15 @@ class HermesSessionAdapter:
                 failure_code="PROVIDER_TIMEOUT",
             )
             print(f"Hermes timeout for {request_id}: {exc}", file=sys.stderr, flush=True)
+        except engain_continuity_client.EngAinContinuityError as exc:
+            safe_response = self._error_response(
+                "EngAIn's shared continuity authority could not answer.",
+                request_id,
+                client_request_id,
+                perception=validated.perception,
+                failure_code=exc.code or "ENGAIN_CONTINUITY_UNAVAILABLE",
+            )
+            print(f"EngAIn continuity dispatch failure for {request_id}: {exc}", file=sys.stderr, flush=True)
         except Exception as exc:
             safe_response = self._error_response(
                 "Hermes could not answer safely. Please try again.",
@@ -2464,6 +2494,92 @@ class HermesSessionAdapter:
         if not (1 <= width <= MAX_VIEWPORT_DIMENSION and 1 <= height <= MAX_VIEWPORT_DIMENSION):
             raise PerceptionValidationError("IMAGE_DIMENSION_MISMATCH", "dimensions are invalid")
         return width, height
+
+    def _engain_continuity_binding_fields(self) -> dict[str, Any]:
+        """This worker's own ProviderSessionBinding, as bare fields —
+        defaults to exactly its existing frozen native Hermes identity, so
+        an unconfigured run behaves like "this worker, talking to Hermes,
+        as always." Every field is independently overridable via env var so
+        a proof/orchestration script can submit a *different* binding for
+        one invocation (e.g. Claude Code's) without this file needing to
+        know Claude Code exists."""
+        launch_options_raw = os.environ.get("ENGAIN_CONTINUITY_LAUNCH_OPTIONS")
+        if launch_options_raw:
+            launch_options = _strict_json_loads(launch_options_raw)
+            if not isinstance(launch_options, dict):
+                raise HermesAdapterError("ENGAIN_CONTINUITY_LAUNCH_OPTIONS must decode to a JSON object")
+        else:
+            launch_options = {"provider": self.client.provider}
+        return {
+            "provider_id": os.environ.get("ENGAIN_CONTINUITY_PROVIDER_ID", "hermes"),
+            "model_id": os.environ.get("ENGAIN_CONTINUITY_MODEL_ID", self.client.model),
+            "provider_session_id": os.environ.get(
+                "ENGAIN_CONTINUITY_PROVIDER_SESSION_ID", self.client.session_id
+            ),
+            "launch_options": launch_options,
+        }
+
+    def _dispatch_via_engain_continuity(self, validated: ValidatedRequest) -> dict[str, Any]:
+        shared_session_id = os.environ.get("ENGAIN_CONTINUITY_SHARED_SESSION_ID")
+        if not shared_session_id:
+            raise HermesAdapterError(
+                f"{_ENGAIN_CONTINUITY_DISPATCH_ENV}=1 set but "
+                "ENGAIN_CONTINUITY_SHARED_SESSION_ID is unset"
+            )
+        binding_fields = self._engain_continuity_binding_fields()
+        return engain_continuity_client.dispatch(
+            shared_session_id=shared_session_id,
+            origin_body=_ENGAIN_ORIGIN_BODY,
+            player_input=validated.player_input,
+            provider_id=binding_fields["provider_id"],
+            model_id=binding_fields["model_id"],
+            provider_session_id=binding_fields["provider_session_id"],
+            agent_id=binding_fields["provider_id"],
+            instance_id=self._presence_instance_id(),
+            launch_options=binding_fields["launch_options"],
+        )
+
+    def _engain_continuity_response(
+        self,
+        engain_result: dict[str, Any],
+        validated: ValidatedRequest,
+    ) -> dict[str, Any]:
+        """Mirrors _sanitize_response's output shape — same schema Godot
+        already parses, unchanged — but sources narrative_response from
+        EngAIn's own answer rather than this worker's own Hermes CLI
+        receipt, since that receipt proves nothing about a response that
+        may legitimately have come from a different provider entirely.
+        provider_session_ref (via _provenance_fields) still reports this
+        worker's own frozen native identity, unchanged, since the schema
+        itself is frozen; director_analysis is where the *true* answering
+        actor and Ledger turn_id are honestly recorded instead."""
+        result = {
+            "request_id": validated.request_id,
+            "client_request_id": validated.client_request_id,
+            "narrative_response": engain_result["response"],
+            "action_type": "OBSERVATION",
+            "state_changes": {},
+            "director_analysis": (
+                f"EngAIn shared continuity (actor={engain_result['actor']!r}, "
+                f"turn_id={engain_result['turn_id']})"
+            ),
+            "reasoning": (
+                "Full runtime perception lane; correlated viewport image attached"
+                if validated.perception.viewport_image_attached
+                else "Structured runtime perception lane; no viewport image attached"
+            ),
+            "entropy_impact": 0.0,
+            "timestamp": time.time(),
+        }
+        if validated.has_call_contract:
+            result["call_id"] = validated.call_id
+        result.update(
+            self._provenance_fields(
+                validated.perception,
+                provider_invoked=True,
+            )
+        )
+        return result
 
     def _sanitize_response(
         self,
