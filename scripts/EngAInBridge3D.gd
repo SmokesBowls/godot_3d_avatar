@@ -4,12 +4,14 @@ extends Node
 signal log_line(kind: String, text: String)
 signal dragon_speaking(active: bool)
 signal submission_committed(client_request_id: String, submitted_text: String)
+signal status_changed(status: String)
 
 const PerceptionCapture := preload("res://scripts/PerceptionCapture3D.gd")
 
 const PROJECT_ROOT := "/mnt/data-drive/godot_engain_3d_avatar"
-const REQUEST_MAILBOX_PATH := "/mnt/data-drive/godot_engain_3d_avatar/engain_request.json"
-const RESPONSE_MAILBOX_PATH := "/mnt/data-drive/godot_engain_3d_avatar/engain_response.json"
+const MAILBOX_ROOT := "/mnt/data-drive/engain-runtime-mailboxes/dragon3d"
+const REQUEST_MAILBOX_PATH := MAILBOX_ROOT + "/request.json"
+const RESPONSE_MAILBOX_PATH := MAILBOX_ROOT + "/response.json"
 const ADAPTER_PATH := "/mnt/data-drive/godot_engain_3d_avatar/hermes_session_adapter.py"
 const PYTHON_EXECUTABLE := "/usr/bin/python3"
 const FROZEN_SESSION_ID := "20260731_065008_63a62d"
@@ -17,9 +19,14 @@ const FROZEN_COMPANION := "hermes_b"
 const FROZEN_PROVIDER := "openai-codex"
 const FROZEN_MODEL := "gpt-5.6-sol"
 const WAIT_TIMEOUT_SEC := 180.0
+const CALL_LIFETIME_SEC := 185.0
 const POLL_INTERVAL_SEC := 0.1
 const MAILBOX_BUSY := "MAILBOX_BUSY"
+const MAILBOX_STALE := "MAILBOX_STALE"
+const LISTENER_ABSENT := "LISTENER_ABSENT"
 const REQUEST_SCHEMA: Array[String] = [
+	"call_id",
+	"expires_at",
 	"player_input",
 	"game_state",
 	"additional_context",
@@ -31,7 +38,44 @@ const CONTEXT_SCHEMA: Array[String] = [
 	"companion_ref",
 	"perception",
 ]
+const TEXT_ONLY_CONTEXT_SCHEMA: Array[String] = [
+	"client_request_id",
+	"companion_ref",
+	"routing_mode",
+]
+const ROUTE_TEXT_ONLY := "text_only"
+const ROUTE_CURRENT_PERCEPTION := "current_perception"
+const STATUS_IDLE := "IDLE"
+const STATUS_LOOKING_INTERNAL := "LOOKING_INTERNAL"
+const STATUS_THINKING := "THINKING"
+const NO_CURRENT_IMAGE_PHRASES: Array[String] = [
+	"without using any current image", "without a current image",
+	"do not use any current image", "do not use a current image",
+	"don't use any current image", "don't use a current image",
+	"no current image", "text only",
+]
+const CURRENT_VIEW_PHRASES: Array[String] = [
+	"what do you see", "what can you see", "what is visible", "currently visible",
+	"current viewport", "current view", "current screen", "current frame", "current scene",
+	"current room", "right now", "in front of me", "left side of the screen",
+	"right side of the screen", "left side of the frame", "right side of the frame",
+	"look at this", "look here", "look around",
+]
+const HISTORY_SCOPES: Array[String] = [
+	"in your memory", "from memory", "in the previous scene", "in the prior scene",
+	"in the earlier scene", "last time", "previously",
+]
+const ROUTING_ANCHORS: Array[String] = [
+	"this", "these", "here", "currently", "right now", "at the moment",
+	"in front of me", "on the screen", "in the frame", "in the viewport",
+]
+const VISUAL_SPATIAL_TERMS: Array[String] = [
+	"see", "look", "visible", "view", "screen", "frame", "viewport", "scene", "room",
+	"object", "dragon", "color", "colour", "where", "location", "left", "right", "front",
+	"behind", "above", "below", "near", "far", "different", "compare",
+]
 const RESPONSE_SCHEMA: Array[String] = [
+	"call_id",
 	"request_id",
 	"client_request_id",
 	"narrative_response",
@@ -122,14 +166,17 @@ var user_name: String = "You"
 var dragon_name: String = "Dragon"
 var lore_name: String = "Mr. Lore"
 var provider_execution_count: int = 0
+var lifecycle_status: String = STATUS_IDLE
 
 var _busy: bool = false
 var _capture_pending: bool = false
 var _dragon_speaking_active: bool = false
 var _lifecycle_generation: int = 0
 var _active_request_id: String = ""
+var _active_call_id: String = ""
 var _active_client_request_id: String = ""
 var _active_capture_id: String = ""
+var _active_route: String = ""
 var _active_started_msec: int = 0
 var _poll_accumulator_sec: float = 0.0
 var _submission_counter: int = 0
@@ -141,6 +188,10 @@ func _ready() -> void:
 	_capture_producer = PerceptionCapture.new()
 	add_child(_capture_producer)
 	_emit_sys("Mailbox bridge ready. session_id=%s" % FROZEN_SESSION_ID)
+
+
+func _exit_tree() -> void:
+	_end_active_lifecycle()
 
 
 func _process(delta: float) -> void:
@@ -164,16 +215,12 @@ func _process(delta: float) -> void:
 
 func submit(text: String) -> void:
 	var msg := text.strip_edges()
-	var capture_result: Variant
 	if msg == "":
 		return
 	if _capture_pending:
 		return
 	if _busy:
 		_reject_busy("one request is already active.")
-		return
-	if FileAccess.file_exists(REQUEST_MAILBOX_PATH):
-		_reject_busy("engain_request.json already exists.")
 		return
 	if FileAccess.file_exists(RESPONSE_MAILBOX_PATH):
 		_reject_busy("engain_response.json is unread.")
@@ -186,57 +233,67 @@ func submit(text: String) -> void:
 		return
 	_lifecycle_generation += 1
 	var lifecycle_generation := _lifecycle_generation
+	var route := _classify_route(msg)
 	_busy = true
-	_capture_pending = true
 	_active_client_request_id = client_request_id
+	_active_route = route
 	_active_started_msec = Time.get_ticks_msec()
-	capture_result = await _capture_producer.capture_for_submission(client_request_id)
-	if lifecycle_generation != _lifecycle_generation:
-		return
-	if not _busy or _active_client_request_id != client_request_id:
-		return
-	if typeof(capture_result) != TYPE_DICTIONARY:
-		_end_active_lifecycle()
-		_emit_err("Live capture returned a non-object result.")
-		return
-	var status: Variant = capture_result.get("status")
-	if status not in ["full", "unavailable"]:
-		_end_active_lifecycle()
-		_emit_err("Live capture returned an invalid status.")
-		return
-	if not _validate_live_capture_result(capture_result as Dictionary, client_request_id):
-		_end_active_lifecycle()
-		_emit_err("Live capture failed its frozen result contract.")
-		return
-	var capture_id: String = capture_result["capture_id"]
-	var perception: Dictionary = capture_result["perception"]
+	var capture_id := ""
+	var perception: Dictionary = {}
+	var capture_status := ""
+	if route == "text_only":
+		pass
+	else:
+		_capture_pending = true
+		_set_lifecycle_status("LOOKING_INTERNAL")
+		var capture_result: Variant = await _capture_producer.capture_for_submission(client_request_id)
+		if lifecycle_generation != _lifecycle_generation:
+			return
+		if not _busy or _active_client_request_id != client_request_id:
+			return
+		if typeof(capture_result) != TYPE_DICTIONARY:
+			_end_active_lifecycle()
+			_emit_err("Live capture returned a non-object result.")
+			return
+		capture_status = capture_result.get("status")
+		if capture_status not in ["full", "unavailable"]:
+			_end_active_lifecycle()
+			_emit_err("Live capture returned an invalid status.")
+			return
+		if not _validate_live_capture_result(capture_result as Dictionary, client_request_id):
+			_end_active_lifecycle()
+			_emit_err("Live capture failed its frozen result contract.")
+			return
+		capture_id = capture_result["capture_id"]
+		perception = capture_result["perception"]
 	var request_id := "req_" + _random_hex_16()
 	if not _matches_pattern(request_id, "^req_[0-9a-f]{32}$"):
 		_end_active_lifecycle()
 		_emit_err("Mailbox request identity allocation failed.")
 		return
 	var timestamp := Time.get_unix_time_from_system()
-	if status == "full":
-		var capture_age := timestamp - float(capture_result["captured_at"])
+	if capture_status == "full":
+		var capture_age := timestamp - float(perception["captured_at"])
 		if capture_age < 0.0 or capture_age > 5.0:
 			_end_active_lifecycle()
 			_emit_err("Live capture became stale before mailbox publication.")
 			return
-	var payload := _build_mailbox_request(
-		msg,
-		request_id,
-		client_request_id,
-		perception,
-		timestamp
-	)
+	var payload := _build_text_only_mailbox_request(msg, request_id, client_request_id, timestamp)
+	if route == ROUTE_CURRENT_PERCEPTION:
+		payload = _build_mailbox_request(msg, request_id, client_request_id, perception, timestamp)
 	if not _has_exact_keys(payload, REQUEST_SCHEMA):
 		_end_active_lifecycle()
 		_emit_err("Generated request failed frozen request schema.")
 		return
 	var context: Variant = payload.get("additional_context")
-	if typeof(context) != TYPE_DICTIONARY or not _has_exact_keys(context, CONTEXT_SCHEMA):
+	var context_schema := TEXT_ONLY_CONTEXT_SCHEMA if route == ROUTE_TEXT_ONLY else CONTEXT_SCHEMA
+	if typeof(context) != TYPE_DICTIONARY or not _has_exact_keys(context, context_schema):
 		_end_active_lifecycle()
 		_emit_err("Generated request context failed frozen schema.")
+		return
+	if route == ROUTE_TEXT_ONLY and context.get("routing_mode") != "text_only":
+		_end_active_lifecycle()
+		_emit_err("Generated text-only request failed its frozen routing mode.")
 		return
 
 	var temporary_path := PROJECT_ROOT + "/.engain_request.%s.tmp" % request_id
@@ -260,11 +317,13 @@ func submit(text: String) -> void:
 		return
 
 	_active_request_id = request_id
+	_active_call_id = request_id
 	_active_client_request_id = client_request_id
 	_active_capture_id = capture_id
 	_capture_pending = false
 	_emit_user(msg)
 	emit_signal("submission_committed", client_request_id, msg)
+	_set_lifecycle_status("THINKING")
 	_dragon_speaking_active = true
 	emit_signal("dragon_speaking", true)
 
@@ -277,12 +336,57 @@ func _build_mailbox_request(
 	timestamp: float
 ) -> Dictionary:
 	return {
+		"call_id": request_id,
+		"expires_at": timestamp + CALL_LIFETIME_SEC,
 		"player_input": msg,
 		"game_state": {},
 		"additional_context": {
 			"client_request_id": client_request_id,
 			"companion_ref": "hermes_b",
 			"perception": perception,
+		},
+		"timestamp": timestamp,
+		"request_id": request_id,
+	}
+
+
+func _classify_route(text: String) -> String:
+	for phrase in NO_CURRENT_IMAGE_PHRASES:
+		if text.containsn(phrase):
+			return ROUTE_TEXT_ONLY
+	for scope in HISTORY_SCOPES:
+		if text.containsn(scope):
+			return ROUTE_TEXT_ONLY
+	for phrase in CURRENT_VIEW_PHRASES:
+		if text.containsn(phrase):
+			return ROUTE_CURRENT_PERCEPTION
+	var has_current_anchor := false
+	for anchor in ROUTING_ANCHORS:
+		if text.containsn(anchor):
+			has_current_anchor = true
+			break
+	if has_current_anchor:
+		for term in VISUAL_SPATIAL_TERMS:
+			if text.containsn(term):
+				return ROUTE_CURRENT_PERCEPTION
+	return ROUTE_TEXT_ONLY
+
+
+func _build_text_only_mailbox_request(
+	msg: String,
+	request_id: String,
+	client_request_id: String,
+	timestamp: float
+) -> Dictionary:
+	return {
+		"call_id": request_id,
+		"expires_at": timestamp + CALL_LIFETIME_SEC,
+		"player_input": msg,
+		"game_state": {},
+		"additional_context": {
+			"client_request_id": client_request_id,
+			"companion_ref": "hermes_b",
+			"routing_mode": "text_only",
 		},
 		"timestamp": timestamp,
 		"request_id": request_id,
@@ -480,7 +584,12 @@ func _decode_claimed_response(output: String) -> Variant:
 
 
 func _validate_correlated_response(value: Dictionary) -> bool:
-	if not _has_exact_keys(value, RESPONSE_SCHEMA):
+	var response_schema := RESPONSE_SCHEMA.duplicate()
+	if _active_call_id == "":
+		response_schema.erase("call_id")
+	if not _has_exact_keys(value, response_schema):
+		return false
+	if _active_call_id != "" and value.get("call_id") != _active_call_id:
 		return false
 	var request_id: Variant = value.get("request_id")
 	if request_id != _active_request_id:
@@ -531,13 +640,31 @@ func _validate_perception_result(value: Variant) -> bool:
 		return false
 	if value.get("schema") != "engain.runtime_perception_result.v1":
 		return false
-	if value.get("requested_state") not in ["full", "structured_only", "unavailable"]:
+	if value.get("requested_state") not in ["full", "structured_only", "unavailable", "not_requested"]:
 		return false
-	if value.get("effective_state") not in ["full", "structured_only", "unavailable", "rejected"]:
+	if value.get("effective_state") not in ["full", "structured_only", "unavailable", "rejected", "not_requested"]:
 		return false
 	if typeof(value.get("structured_snapshot_supplied")) != TYPE_BOOL:
 		return false
 	if typeof(value.get("viewport_image_attached")) != TYPE_BOOL:
+		return false
+	var originating_text_only := _active_capture_id == ""
+	if value.get("requested_state") == "not_requested" or value.get("effective_state") == "not_requested":
+		return (
+			originating_text_only
+			and value.get("requested_state") == "not_requested"
+			and value.get("effective_state") == "not_requested"
+			and value.get("capture_id") == null
+			and value.get("capture_event") == null
+			and value.get("capture_phase") == null
+			and value.get("captured_at") == null
+			and value.get("metadata_sha256") == null
+			and value.get("image_sha256") == null
+			and value.get("structured_snapshot_supplied") == false
+			and value.get("viewport_image_attached") == false
+			and value.get("failure_code") == null
+		)
+	if originating_text_only:
 		return false
 	if value.get("effective_state") == "rejected":
 		return true
@@ -576,6 +703,15 @@ func _execute_adapter(arguments: PackedStringArray) -> Dictionary:
 	return {"code": code, "output": combined.strip_edges()}
 
 
+func _set_lifecycle_status(status: String) -> void:
+	if status not in [STATUS_IDLE, STATUS_LOOKING_INTERNAL, STATUS_THINKING]:
+		return
+	if lifecycle_status == status:
+		return
+	lifecycle_status = status
+	emit_signal("status_changed", status)
+
+
 func _end_active_lifecycle() -> void:
 	var was_speaking := _dragon_speaking_active
 	_lifecycle_generation += 1
@@ -583,9 +719,12 @@ func _end_active_lifecycle() -> void:
 	_capture_pending = false
 	_dragon_speaking_active = false
 	_active_request_id = ""
+	_active_call_id = ""
 	_active_client_request_id = ""
 	_active_capture_id = ""
+	_active_route = ""
 	_active_started_msec = 0
+	_set_lifecycle_status("IDLE") # Clear LOOKING_INTERNAL or THINKING.
 	if was_speaking:
 		emit_signal("dragon_speaking", false)
 

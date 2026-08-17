@@ -134,11 +134,11 @@ def test_publish_request_cli_route_is_public_and_provider_free(
     temporary = _write_temp(tmp_path)
     calls: list[Path] = []
 
-    def fake_publish(path: Path) -> Path:
+    def fake_publish(_self: Any, path: Path) -> Path:
         calls.append(Path(path))
         return tmp_path / FINAL_REQUEST_BASENAME
 
-    monkeypatch.setattr(adapter_module, "publish_request", fake_publish, raising=False)
+    monkeypatch.setattr(adapter_module.HermesSessionAdapter, "publish_request", fake_publish)
     result = adapter_module.main(["--publish-request", str(temporary.resolve())])
     assert result == 0
     assert calls == [temporary.resolve()]

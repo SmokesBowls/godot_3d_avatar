@@ -15,8 +15,8 @@ SOURCE = BRIDGE_PATH.read_text(encoding="utf-8")
 REQUEST_ID = "req_0123456789abcdef0123456789abcdef"
 CLIENT_REQUEST_ID = "dragon3d_0123456789abcdef0123456789abcdef_1"
 SESSION_ID = "20260731_065008_63a62d"
-REQUEST_PATH = "/mnt/data-drive/godot_engain_3d_avatar/engain_request.json"
-RESPONSE_PATH = "/mnt/data-drive/godot_engain_3d_avatar/engain_response.json"
+REQUEST_PATH = "/mnt/data-drive/engain-runtime-mailboxes/dragon3d"
+RESPONSE_PATH = 'MAILBOX_ROOT + "/response.json"'
 RESPONSE_KEYS = {
     "request_id",
     "client_request_id",
@@ -140,8 +140,8 @@ def test_submission_has_one_active_lifecycle_and_checks_both_mailboxes() -> None
         "_active_request_id",
         "_active_client_request_id",
         "MAILBOX_BUSY",
-        "engain_request.json",
-        "engain_response.json",
+        'MAILBOX_ROOT + "/request.json"',
+        'MAILBOX_ROOT + "/response.json"',
         ".engain_request.",
         "--publish-request",
     )
@@ -171,8 +171,8 @@ def test_request_builder_contains_exact_frozen_wire_surface() -> None:
 def test_request_publication_never_overwrites_request_or_unread_response() -> None:
     _require_all(
         "FileAccess.file_exists",
-        "engain_request.json",
-        "engain_response.json",
+        'MAILBOX_ROOT + "/request.json"',
+        'MAILBOX_ROOT + "/response.json"',
         "MAILBOX_BUSY",
         "--publish-request",
     )

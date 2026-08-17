@@ -29,6 +29,19 @@ text = "ControlHUD terminal initialized...
 [color=gray]Awaiting draconic connection in 3D space...[/color]
 "
 
+[node name="LifecycleStatus" type="Label" parent="."]
+anchors_preset = 12
+anchor_top = 1.0
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 50.0
+offset_top = -155.0
+offset_right = -50.0
+offset_bottom = -125.0
+grow_horizontal = 2
+grow_vertical = 0
+horizontal_alignment = 1
+
 [node name="CollaborationInput" type="LineEdit" parent="."]
 anchors_preset = 12
 anchor_top = 1.0

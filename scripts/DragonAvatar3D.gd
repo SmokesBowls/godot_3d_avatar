@@ -135,7 +135,7 @@ func set_pulse_color(col: Color) -> void:
 	pulse_intensity = col
 
 func set_orbit_parameters(radius: float = -1, speed: float = -1,
-	                      bob_height: float = -1, bob_speed: float = -1) -> void:
+						  bob_height: float = -1, bob_speed: float = -1) -> void:
 	"""
 	Convenient way to tweak orbit/bob values at runtime (e.g. from the inspector
 	or another script).

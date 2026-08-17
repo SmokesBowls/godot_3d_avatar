@@ -3,6 +3,7 @@ extends CanvasLayer
 @onready var output: RichTextLabel = $Output
 @onready var input: LineEdit = $CollaborationInput
 @onready var send_btn: Button = $SendLoreButton
+@onready var lifecycle_status: Label = $LifecycleStatus
 
 # Pod layout:
 # Main
@@ -22,6 +23,9 @@ func _ready() -> void:
 		_bridge.connect("log_line", Callable(self, "_on_log_line"))
 	if _bridge.has_signal("submission_committed"):
 		_bridge.connect("submission_committed", Callable(self, "_on_submission_committed"))
+	if _bridge.has_signal("status_changed"):
+		_bridge.connect("status_changed", Callable(self, "_on_status_changed"))
+		_on_status_changed(str(_bridge.get("lifecycle_status")))
 
 	input.text_submitted.connect(_on_input_submitted)
 	send_btn.pressed.connect(_on_send_pressed)
@@ -47,6 +51,13 @@ func _on_submission_committed(client_request_id: String, submitted_text: String)
 
 func _on_log_line(kind: String, text: String) -> void:
 	_append(kind, text)
+
+
+func _on_status_changed(status: String) -> void:
+	if status == "THINKING":
+		lifecycle_status.text = "Dragon is thinking..."
+	elif status == "IDLE":
+		lifecycle_status.text = ""
 
 
 func _append(kind: String, text: String) -> void:

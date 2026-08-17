@@ -42,6 +42,11 @@ MAX_HERMES_CAPTURE_BYTES = 1_100_000
 MAX_HERMES_PROMPT_CHARS = 262_144
 MAX_JSON_DEPTH = 64
 MAX_HERMES_TIMEOUT_SECONDS = 180.0
+LISTENER_LEASE_SECONDS = 2.0
+DEFAULT_CALL_LIFETIME_SECONDS = 185.0
+DEFAULT_MAILBOX_ROOT = Path("/mnt/data-drive/engain-runtime-mailboxes")
+CALLER_ID = "dragon3d"
+CANONICAL_PROJECT_ROOT = Path("/mnt/data-drive/godot_engain_3d_avatar")
 SQLITE_BUSY_TIMEOUT_MS = 1000
 HERMES_EMPTY_TOOLSET = "__engain_text_only_no_tools_v1__"
 HERMES_PROFILE = "default"
@@ -142,7 +147,7 @@ def _strict_json_loads(text: str) -> Any:
 
 def _claim_strict_json_mailbox(path: Path, limit: int) -> str:
     """Atomically move one mailbox entry, then parse its exact claimed inode."""
-    if path.name != "engain_response.json" and not path.name.endswith("bridge_response.json"):
+    if path.name not in {"engain_response.json", "response.json"} and not path.name.endswith("bridge_response.json"):
         raise ValueError("response mailbox basename is not allowed")
     if not hasattr(os, "O_DIRECTORY") or not hasattr(os, "O_NOFOLLOW"):
         raise HermesAdapterError("descriptor-bound response claiming is unavailable")
@@ -646,10 +651,19 @@ class AdapterConfig:
     poll_seconds: float = 0.1
     state_file: Path | None = None
     pid_file: Path | None = None
+    mailbox_root: Path | None = None
 
     def __post_init__(self) -> None:
         project_dir = Path(self.project_dir).resolve()
         object.__setattr__(self, "project_dir", project_dir)
+        mailbox_root = (
+            DEFAULT_MAILBOX_ROOT
+            if self.mailbox_root is None and project_dir == CANONICAL_PROJECT_ROOT
+            else project_dir
+            if self.mailbox_root is None
+            else Path(self.mailbox_root).resolve()
+        )
+        object.__setattr__(self, "mailbox_root", mailbox_root)
         executable = Path(self.hermes_executable).resolve()
         if executable != TRUSTED_HERMES_EXECUTABLE:
             raise ValueError("Hermes executable path is fixed by the Workload 3 contract")
@@ -682,11 +696,21 @@ class AdapterConfig:
 
     @property
     def request_file(self) -> Path:
-        return self.project_dir / "engain_request.json"
+        if self.mailbox_root == self.project_dir:
+            return self.project_dir / "engain_request.json"
+        return cast(Path, self.mailbox_root) / CALLER_ID / "request.json"
 
     @property
     def response_file(self) -> Path:
-        return self.project_dir / "engain_response.json"
+        if self.mailbox_root == self.project_dir:
+            return self.project_dir / "engain_response.json"
+        return cast(Path, self.mailbox_root) / CALLER_ID / "response.json"
+
+    @property
+    def listener_file(self) -> Path:
+        if self.mailbox_root == self.project_dir:
+            return self.project_dir / ".godot" / "engain_listener.json"
+        return cast(Path, self.mailbox_root) / CALLER_ID / "listener.json"
 
     @property
     def snapshot_root(self) -> Path:
@@ -710,12 +734,16 @@ class ValidatedPerception:
 
 @dataclass(frozen=True)
 class ValidatedRequest:
+    has_call_contract: bool
+    call_id: str
+    expires_at: float
     request_id: str
     client_request_id: str
     player_input: str
     game_state: dict[str, Any]
     companion_ref: str
-    perception: ValidatedPerception
+    routing_mode: str
+    perception: ValidatedPerception | None
 
 
 @dataclass(frozen=True)
@@ -1172,8 +1200,12 @@ class HermesSessionAdapter:
         )
         self.director_bridge = director_bridge
         self.processed_request_ids: list[str] = []
+        self.worker_state = "STOPPED"
+        self._worker_started = False
 
     def prepare(self) -> None:
+        if self._worker_started:
+            raise HermesAdapterError("stopped worker instance cannot be restarted")
         self.config.project_dir.mkdir(parents=True, exist_ok=True)
         self._load_state()
         if self.client.session_id != PERSISTED_HERMES_B_SESSION_ID:
@@ -1186,6 +1218,19 @@ class HermesSessionAdapter:
             )
         if self.director_bridge is None:
             self.director_bridge = self._build_director_bridge()
+        self._worker_started = True
+        self.worker_state = "READY"
+        self.mark_listener_ready()
+
+    def request_stop(self) -> None:
+        """Request an idle worker stop without admitting further mailbox work."""
+        if self.worker_state == "READY":
+            self.worker_state = "STOPPING"
+        self.config.listener_file.unlink(missing_ok=True)
+
+    def _finish_stop(self) -> None:
+        if self._worker_started:
+            self.worker_state = "STOPPED"
 
     def _build_director_bridge(self) -> Any:
         return LocalObservationDirector(self.client)
@@ -1210,7 +1255,8 @@ class HermesSessionAdapter:
         validated = self._validate_request(payload)
         perception = validated.perception
         if (
-            perception.requested_state != "full"
+            perception is None
+            or perception.requested_state != "full"
             or perception.effective_state != "full"
             or not perception.viewport_image_attached
             or perception.metadata is None
@@ -1318,6 +1364,11 @@ class HermesSessionAdapter:
     ) -> None:
         """Bind provider admission to the exact already-validated live image."""
         perception = validated.perception
+        if perception is None:
+            raise PerceptionValidationError(
+                "PREPARATION_MISMATCH",
+                "live image preparation requires current perception",
+            )
         metadata = perception.metadata
         if not isinstance(preparation, dict) or not isinstance(metadata, dict):
             raise PerceptionValidationError(
@@ -1352,6 +1403,10 @@ class HermesSessionAdapter:
                 )
 
     def process_once(self) -> bool:
+        if self._worker_started and self.worker_state != "READY":
+            return False
+        if self._worker_started:
+            self.mark_listener_ready()
         if self.config.response_file.exists():
             return False
         claimed_path = self._claim_request_file()
@@ -1390,6 +1445,68 @@ class HermesSessionAdapter:
             print(f"Could not claim EngAIn request file: {exc}", flush=True)
             return None
         return claimed_path
+
+    def mark_listener_ready(self, *, now: float | None = None) -> None:
+        current = time.time() if now is None else now
+        payload = {"pid": os.getpid(), "expires_at": current + LISTENER_LEASE_SECONDS}
+        self._atomic_write(
+            self.config.listener_file,
+            json.dumps(payload, separators=(",", ":")) + "\n",
+        )
+
+    def _listener_is_live(self, *, now: float) -> bool:
+        try:
+            payload = _strict_json_loads(self.config.listener_file.read_text(encoding="utf-8"))
+            pid = payload.get("pid") if isinstance(payload, dict) else None
+            expires_at = payload.get("expires_at") if isinstance(payload, dict) else None
+            if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+                return False
+            if not self._is_finite_number(expires_at):
+                return False
+            if float(cast(float, expires_at)) <= now:
+                return False
+            os.kill(pid, 0)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return False
+        return True
+
+    def publish_request(self, temporary_path: Path, *, now: float | None = None) -> Path:
+        current = time.time() if now is None else now
+        temporary_path = Path(temporary_path)
+        request_path = self.config.request_file
+        request_path.parent.mkdir(parents=True, exist_ok=True)
+        pending_paths = [request_path] if request_path.exists() else []
+        pending_paths.extend(sorted(request_path.parent.glob(f".{request_path.name}.*.processing")))
+        if pending_paths:
+            stale_paths: list[Path] = []
+            live_path_found = False
+            for pending_path in pending_paths:
+                stale = False
+                try:
+                    existing = _strict_json_loads(pending_path.read_text(encoding="utf-8"))
+                    expires_at = existing.get("expires_at") if isinstance(existing, dict) else None
+                    stale = self._is_finite_number(expires_at) and float(cast(float, expires_at)) <= current
+                except (OSError, UnicodeDecodeError, ValueError):
+                    stale = False
+                if stale:
+                    stale_paths.append(pending_path)
+                else:
+                    live_path_found = True
+            if live_path_found:
+                raise HermesAdapterError("MAILBOX_BUSY: live call is already pending")
+            for stale_path in stale_paths:
+                stale_path.unlink()
+            raise HermesAdapterError("MAILBOX_STALE: expired abandoned call cleared")
+        payload = _strict_json_loads(temporary_path.read_text(encoding="utf-8"))
+        self._validate_request(payload, validation_time=current)
+        if not self._listener_is_live(now=current):
+            raise HermesAdapterError("LISTENER_ABSENT: no live mailbox worker")
+        try:
+            os.link(temporary_path, request_path, follow_symlinks=False)
+        except FileExistsError as exc:
+            raise HermesAdapterError("MAILBOX_BUSY: live call is already pending") from exc
+        temporary_path.unlink()
+        return request_path
 
     def _process_claimed_request(self, claimed_path: Path) -> bool:
         try:
@@ -1487,7 +1604,8 @@ class HermesSessionAdapter:
         self._reserve_request(request_id)
 
         if (
-            validated.perception.requested_state == "full"
+            validated.perception is not None
+            and validated.perception.requested_state == "full"
             and validated.perception.effective_state == "full"
         ):
             try:
@@ -1648,21 +1766,39 @@ class HermesSessionAdapter:
     ) -> ValidatedRequest:
         if not isinstance(payload, dict):
             raise ValueError("request must be a JSON object")
-        if set(payload) != {
+        legacy_keys = {
             "player_input",
             "game_state",
             "additional_context",
             "timestamp",
             "request_id",
-        }:
+        }
+        current_keys = legacy_keys | {
+            "call_id",
+            "expires_at",
+        }
+        if set(payload) not in (legacy_keys, current_keys):
             raise ValueError("request keys do not match the frozen schema")
+        has_call_contract = set(payload) == current_keys
         request_id = payload.get("request_id")
+        call_id = payload.get("call_id", request_id)
+        expires_at = payload.get("expires_at")
         player_input = payload.get("player_input")
         game_state = payload.get("game_state")
         additional_context = payload.get("additional_context")
         request_timestamp = payload.get("timestamp")
         if not isinstance(request_id, str) or not request_id.strip():
             raise PerceptionValidationError("SCHEMA_INVALID", "request_id is invalid")
+        if not isinstance(call_id, str) or call_id != request_id:
+            raise PerceptionValidationError("SCHEMA_INVALID", "call_id must match request_id")
+        effective_validation_time = time.time() if validation_time is None else validation_time
+        if expires_at is None:
+            expires_at = effective_validation_time + DEFAULT_CALL_LIFETIME_SECONDS
+        if not self._is_finite_number(expires_at):
+            raise PerceptionValidationError("SCHEMA_INVALID", "expires_at is invalid")
+        expires_at_float = float(cast(float, expires_at))
+        if expires_at_float <= effective_validation_time:
+            raise PerceptionValidationError("CALL_EXPIRED", "call is expired")
         if not isinstance(player_input, str):
             raise ValueError("player_input must be a string")
         if _has_disallowed_control(player_input):
@@ -1674,11 +1810,25 @@ class HermesSessionAdapter:
         self._validate_json_values(game_state, "game_state")
         if not isinstance(additional_context, dict):
             raise ValueError("additional_context must be a JSON object")
-        if set(additional_context) != {
+        current_perception_keys = {
             "client_request_id",
             "companion_ref",
             "perception",
-        }:
+        }
+        text_only_keys = {
+            "client_request_id",
+            "companion_ref",
+            "routing_mode",
+        }
+        context_keys = set(additional_context)
+        if context_keys == current_perception_keys:
+            routing_mode = "current_perception"
+        elif (
+            context_keys == text_only_keys
+            and additional_context.get("routing_mode") == "text_only"
+        ):
+            routing_mode = "text_only"
+        else:
             raise PerceptionValidationError(
                 "SCHEMA_INVALID", "additional_context keys do not match the frozen schema"
             )
@@ -1704,18 +1854,24 @@ class HermesSessionAdapter:
             raise PerceptionValidationError(
                 "COMPANION_REF_INVALID", "companion_ref must identify hermes_b"
             )
-        validated_perception = self._validate_perception(
-            perception,
-            client_request_id=client_request_id,
-            request_timestamp=float(cast(float, request_timestamp)),
-            validation_time=time.time() if validation_time is None else validation_time,
-        )
+        validated_perception = None
+        if routing_mode == "current_perception":
+            validated_perception = self._validate_perception(
+                perception,
+                client_request_id=client_request_id,
+                request_timestamp=float(cast(float, request_timestamp)),
+                validation_time=effective_validation_time,
+            )
         return ValidatedRequest(
+            has_call_contract=has_call_contract,
+            call_id=call_id,
+            expires_at=expires_at_float,
             request_id=request_id,
             client_request_id=client_request_id,
             player_input=player_input,
             game_state=game_state,
             companion_ref=companion_ref,
+            routing_mode=routing_mode,
             perception=validated_perception,
         )
 
@@ -2201,17 +2357,24 @@ class HermesSessionAdapter:
             "state_changes": {},
             "director_analysis": "Hermes conversational response",
             "reasoning": (
-                "Full runtime perception lane; correlated viewport image attached"
-                if validated.perception.viewport_image_attached
-                else "Structured runtime perception lane; no viewport image attached"
+                "Text-only lane; current runtime perception was not requested"
+                if validated.perception is None
+                else (
+                    "Full runtime perception lane; correlated viewport image attached"
+                    if validated.perception.viewport_image_attached
+                    else "Structured runtime perception lane; no viewport image attached"
+                )
             ),
             "entropy_impact": 0.0,
             "timestamp": time.time(),
         }
+        if validated.has_call_contract:
+            result["call_id"] = validated.call_id
         result.update(
             self._provenance_fields(
                 validated.perception,
                 provider_invoked=True,
+                not_requested=validated.routing_mode == "text_only",
             )
         )
         return result
@@ -2222,6 +2385,7 @@ class HermesSessionAdapter:
         request_id: str = "malformed_request",
         client_request_id: str = "",
         *,
+        call_id: str | None = None,
         perception: ValidatedPerception | None = None,
         failure_code: str | None = None,
     ) -> dict[str, Any]:
@@ -2236,6 +2400,8 @@ class HermesSessionAdapter:
             "entropy_impact": 0.0,
             "timestamp": time.time(),
         }
+        if call_id is not None:
+            result["call_id"] = call_id
         result.update(
             self._provenance_fields(
                 perception,
@@ -2253,12 +2419,15 @@ class HermesSessionAdapter:
         effective_state: str | None = None,
         failure_code: str | None = None,
         provider_invoked: bool = False,
+        not_requested: bool = False,
     ) -> dict[str, Any]:
         if perception is None:
             perception_result = {
                 "schema": PERCEPTION_RESULT_SCHEMA,
-                "requested_state": "unavailable",
-                "effective_state": effective_state or "rejected",
+                "requested_state": "not_requested" if not_requested else "unavailable",
+                "effective_state": (
+                    "not_requested" if not_requested else effective_state or "rejected"
+                ),
                 "capture_id": None,
                 "capture_event": None,
                 "capture_phase": None,
@@ -2583,7 +2752,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             print("request publication requires exactly one path", file=sys.stderr, flush=True)
             return 2
         try:
-            publish_request(Path(effective_argv[1]))
+            HermesSessionAdapter(AdapterConfig(project_dir=MAILBOX_PROJECT_ROOT)).publish_request(
+                Path(effective_argv[1])
+            )
         except (OSError, UnicodeDecodeError, ValueError, HermesAdapterError) as exc:
             print(f"request publication rejected: {exc}", file=sys.stderr, flush=True)
             return 1
@@ -2644,16 +2815,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"Hermes session adapter watching {config.request_file}",
                 flush=True,
             )
-            while True:
+            while adapter.worker_state == "READY":
                 adapter.process_once()
                 time.sleep(config.poll_seconds)
     except KeyboardInterrupt:
+        adapter.request_stop()
         print("Hermes session adapter stopped", flush=True)
     except HermesAdapterError as exc:
         print(f"Hermes session adapter error: {exc}", file=sys.stderr, flush=True)
         return 1
     finally:
+        adapter.request_stop()
         lock.release()
+        adapter._finish_stop()
     return 0
 
 

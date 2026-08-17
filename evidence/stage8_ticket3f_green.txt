@@ -1,0 +1,40 @@
+STAGE8_TICKET3F_GREEN_EVIDENCE_V1
+
+TICKET_3F_GREEN=CONFIRMED
+HEAD=77593c205851c97a1b0b46ebdb6ade270309f81a
+
+CONCRETE_RUNTIME_COMPOSITION_PATH=runtime_composition.py
+CONCRETE_RUNTIME_MARKER=ENGAV3D_STAGE8_TICKET3F_CONCRETE_RUNTIME_COMPOSITION_V1
+EXECUTABLE_ENTRY=runtime_composition.main
+GODOT_PROCESS_FACTORY=runtime_composition.create_godot_process
+WORKER_COMPOSITION_SURFACE=runtime_composition.run_concrete_runtime
+SERVICING_MECHANISM=one internal daemon threading.Thread with bounded join
+
+FOCUSED_COMMAND=python3 -m pytest -q tests/test_stage8_ticket3f_runtime_composition_red.py
+FOCUSED_RESULT=8 passed in 0.23s
+TICKET3E_COMMAND=python3 -m pytest -q tests/test_stage8_ticket3e_launcher_supervision_red.py
+TICKET3E_RESULT=7 passed in 0.05s
+WORKER_LIFECYCLE_REGRESSION_COMMAND=python3 -m pytest -q tests/test_stage8_ticket2e_persistent_worker_red.py
+WORKER_LIFECYCLE_REGRESSION=5 passed in 0.13s
+SYNTAX_COMMAND=python3 -m py_compile runtime_composition.py runtime_launcher.py hermes_session_adapter.py
+SYNTAX_RESULT=PASS
+
+PRODUCTION_FILES_CREATED=runtime_composition.py
+PRODUCTION_FILES_CHANGED=0
+TEST_FILES_CHANGED=0
+
+RUNTIME_LAUNCHER_SHA256=e2388f74953a452f5626565fcde7d6e5abc4c92eb01187570d9cf03abd62ec96
+RUNTIME_COMPOSITION_SHA256=54308fa61f76348f2b2190c1c7b08820b57a58cfe36a0b67d30c48abe68e0bcd
+TICKET3F_TEST_SHA256=1b3961ec020fa56ddacf5099abdd761e0d7df5592f9eee04a32616c100acba4a
+TICKET3E_TEST_SHA256=c89aa2153d2a7bb1db50a6b1cf901ef8cefa655f8d0244a1911b56e26e78d68d
+ESTABLISHED_TRACKED_PRODUCTION_DIFF_SHA256_BEFORE=4f3eb7f0b4f538b810ef9fc33f54c7a0345e2375403c6c55ae712b4310241b28
+ESTABLISHED_TRACKED_PRODUCTION_DIFF_SHA256_AFTER=4f3eb7f0b4f538b810ef9fc33f54c7a0345e2375403c6c55ae712b4310241b28
+TICKET3F_COMPOSITION_DIFF_SHA256=5e43e3cc61631ad39f21a7bc8b4fffaed2d9758be5504c87ac99573ec1b4745e
+
+LIFECYCLE=PidFileLock acquisition precedes Ticket 3E prepare; ComposedWorker prepares the sole adapter, requires READY through Ticket 3E, starts one process_once service thread, and passes one Godot Popen factory to run_runtime_generation. Ticket 3E waits once, requests stop once, and observes STOPPED boundedly. ComposedWorker request_stop delegates STOPPING to the adapter, closes the service with a bounded join, then invokes the existing _finish_stop for terminal STOPPED. Ownership releases only after STOPPED. Godot construction failures retain their original exception after the same stop path completes.
+
+GODOT_EXECUTIONS=0
+WORKER_EXECUTIONS=0
+PROVIDER_EXECUTIONS=0
+LIVE_VALIDATION=NOT_BEGUN
+NEXT_TICKET=NOT_BEGUN
