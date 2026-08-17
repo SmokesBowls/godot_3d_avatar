@@ -3,16 +3,22 @@
 from __future__ import annotations
 
 import argparse
+import os
+import sys
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 import subprocess
 import threading
-from typing import Any, Callable, Protocol, Sequence, cast
+from typing import Any, Callable, Optional, Protocol, Sequence, cast
 
 from hermes_session_adapter import AdapterConfig, HermesSessionAdapter, PidFileLock
 from runtime_launcher import LauncherSupervisionError, run_runtime_generation
 
 
 COMPOSITION_MARKER = "ENGAV3D_STAGE8_TICKET3F_CONCRETE_RUNTIME_COMPOSITION_V1"
+PRESENCE_AUTHORITY_SUPERVISION_MARKER = "ENGAV3D_PRESENCE_AUTHORITY_SUPERVISION_V1"
 
 
 class Adapter(Protocol):
@@ -35,6 +41,78 @@ class Service(Protocol):
     def start(self) -> None: ...
 
     def close(self, shutdown_budget_seconds: float) -> None: ...
+
+
+class AuthorityProcess(Protocol):
+    def start(self) -> None: ...
+
+    def wait_until_healthy(self, timeout_seconds: float) -> None: ...
+
+    def stop(self, shutdown_budget_seconds: float) -> None: ...
+
+
+class SupervisedPresenceAuthority:
+    """Spawns and supervises the shared presence authority server as a real
+    child process, health-checked before the worker is allowed to
+    prepare()/register(). Its canonical implementation lives in the EngAIn
+    checkout (tier1/engainos/server/presence_authority_server.py) — not
+    vendored here, since exactly one instance of it should exist
+    system-wide. This composition only needs to know how to launch and
+    supervise it, the same way it already only knows how to launch Godot
+    via --godot-command rather than embedding a Godot build.
+
+    Prior to this, the authority had to be started manually for the claim
+    protection added to hermes_session_adapter.py to do anything; both
+    workers fell back to their fail-open compatibility path silently. This
+    class is what turns that into real, supervised, always-on protection
+    for any generation started through this launcher.
+    """
+
+    def __init__(self, python_command: str, script_path: Path, host: str, port: int) -> None:
+        self._python_command = python_command
+        self._script_path = script_path
+        self._host = host
+        self._port = port
+        self._process: Optional[subprocess.Popen[bytes]] = None
+
+    def start(self) -> None:
+        if not self._script_path.exists():
+            raise LauncherSupervisionError(
+                f"presence authority script not found: {self._script_path}"
+            )
+        self._process = subprocess.Popen(
+            [self._python_command, str(self._script_path), "--host", self._host, "--port", str(self._port)],
+        )
+
+    def wait_until_healthy(self, timeout_seconds: float) -> None:
+        url = f"http://{self._host}:{self._port}/health"
+        deadline = time.monotonic() + timeout_seconds
+        last_error: Optional[Exception] = None
+        while time.monotonic() < deadline:
+            if self._process is not None and self._process.poll() is not None:
+                raise LauncherSupervisionError(
+                    f"presence authority process exited early with code {self._process.returncode}"
+                )
+            try:
+                with urllib.request.urlopen(url, timeout=1.0) as resp:
+                    if resp.status == 200:
+                        return
+            except (urllib.error.URLError, OSError, TimeoutError) as exc:
+                last_error = exc
+            time.sleep(0.05)
+        raise LauncherSupervisionError(
+            f"presence authority did not become healthy within {timeout_seconds}s: {last_error}"
+        )
+
+    def stop(self, shutdown_budget_seconds: float) -> None:
+        if self._process is None:
+            return
+        self._process.terminate()
+        try:
+            self._process.wait(timeout=shutdown_budget_seconds)
+        except subprocess.TimeoutExpired:
+            self._process.kill()
+            self._process.wait(timeout=shutdown_budget_seconds)
 
 
 class PersistentAdapterService:
@@ -111,6 +189,19 @@ def _real_service(adapter: Adapter) -> Service:
     return PersistentAdapterService(cast(HermesSessionAdapter, adapter))
 
 
+def _real_presence_authority(
+    script_path: Optional[Path], python_command: str, host: str, port: int
+) -> Optional[AuthorityProcess]:
+    """None means "not supervised by this launcher" — an explicit,
+    opt-in-only configuration, not a silent default. hermes_session_adapter
+    itself still governs what happens if no authority is ever reachable
+    (fail-closed by default; ENGAIN_PRESENCE_AUTHORITY_FAIL_OPEN_COMPAT=1
+    for the named temporary compatibility path)."""
+    if script_path is None:
+        return None
+    return SupervisedPresenceAuthority(python_command, script_path, host, port)
+
+
 def run_concrete_runtime(
     *,
     project_dir: Path,
@@ -120,8 +211,18 @@ def run_concrete_runtime(
     ownership_factory: Callable[[Path], Ownership] = _real_ownership,
     service_factory: Callable[[Adapter], Service] = _real_service,
     godot_process_factory: Callable[[str, Path], Any] = create_godot_process,
+    presence_authority_factory: Callable[[], Optional[AuthorityProcess]] = lambda: None,
+    presence_authority_ready_timeout_seconds: float = 15.0,
 ) -> int:
-    """Own and supervise exactly one concrete worker/Godot generation."""
+    """Own and supervise exactly one concrete worker/Godot generation.
+
+    Shutdown order (per the operationalization step that added this):
+    worker reaches STOPPED (which itself releases any outstanding claim
+    inside hermes_session_adapter's own request_stop/close path) before the
+    presence authority is stopped — never the other way around, or a
+    worker mid-shutdown could lose claim protection while still able to
+    dispatch.
+    """
     if shutdown_budget_seconds <= 0:
         raise ValueError("shutdown bound must be positive")
     project_dir = Path(project_dir).resolve()
@@ -129,6 +230,11 @@ def run_concrete_runtime(
     ownership = ownership_factory(project_dir)
     service = service_factory(adapter)
     worker = ComposedWorker(adapter, service, shutdown_budget_seconds)
+
+    authority = presence_authority_factory()
+    if authority is not None:
+        authority.start()
+        authority.wait_until_healthy(presence_authority_ready_timeout_seconds)
 
     ownership.acquire()
     try:
@@ -140,9 +246,12 @@ def run_concrete_runtime(
     finally:
         if worker.worker_state == "STOPPED":
             ownership.release()
+        if authority is not None:
+            authority.stop(shutdown_budget_seconds)
 
 
 setattr(run_concrete_runtime, COMPOSITION_MARKER, True)
+setattr(run_concrete_runtime, PRESENCE_AUTHORITY_SUPERVISION_MARKER, True)
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -156,6 +265,21 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=Path(__file__).resolve().parent,
     )
     parser.add_argument("--shutdown-budget", type=float, default=5.0)
+    parser.add_argument(
+        "--presence-authority-script",
+        type=Path,
+        default=None,
+        help=(
+            "Path to EngAIn's tier1/engainos/server/presence_authority_server.py. "
+            "Opt-in only — omitting this flag means no authority is supervised by this "
+            "launcher, and workers fall back to their own fail-closed-by-default behavior "
+            "(or ENGAIN_PRESENCE_AUTHORITY_FAIL_OPEN_COMPAT=1 if explicitly set)."
+        ),
+    )
+    parser.add_argument("--presence-authority-python", default=sys.executable)
+    parser.add_argument("--presence-authority-host", default="127.0.0.1")
+    parser.add_argument("--presence-authority-port", type=int, default=8767)
+    parser.add_argument("--presence-authority-ready-timeout", type=float, default=15.0)
     return parser.parse_args(argv)
 
 
@@ -165,6 +289,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         project_dir=args.project_dir,
         godot_command=args.godot_command,
         shutdown_budget_seconds=args.shutdown_budget,
+        presence_authority_factory=lambda: _real_presence_authority(
+            args.presence_authority_script,
+            args.presence_authority_python,
+            args.presence_authority_host,
+            args.presence_authority_port,
+        ),
+        presence_authority_ready_timeout_seconds=args.presence_authority_ready_timeout,
     )
 
 

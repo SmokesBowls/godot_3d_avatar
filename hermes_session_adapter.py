@@ -30,6 +30,21 @@ import time
 import unicodedata
 from typing import Any, cast, Sequence
 
+import presence_authority_client
+
+# Named explicitly as temporary compatibility, per the operationalization
+# step that turned "authority unreachable" from a silent fail-open default
+# into a deliberate opt-out. Unset (the default) is fail-closed: an
+# unreachable presence authority now blocks startup (prepare() raises) and
+# blocks dispatch (a PRESENCE_AUTHORITY_UNAVAILABLE mailbox response, never
+# reaching Hermes) — the same posture as a real competing claim, not a
+# warning that gets logged and ignored.
+_PRESENCE_AUTHORITY_FAIL_OPEN_COMPAT_ENV = "ENGAIN_PRESENCE_AUTHORITY_FAIL_OPEN_COMPAT"
+
+
+def _presence_authority_fail_open_compat_enabled() -> bool:
+    return os.environ.get(_PRESENCE_AUTHORITY_FAIL_OPEN_COMPAT_ENV) == "1"
+
 
 SESSION_ID_PATTERN = re.compile(r"(?m)^session_id:\s*([^\s]+)\s*$")
 MAX_PROCESSED_REQUEST_IDS = 256
@@ -1218,9 +1233,93 @@ class HermesSessionAdapter:
             )
         if self.director_bridge is None:
             self.director_bridge = self._build_director_bridge()
+        self._register_with_presence_authority()
         self._worker_started = True
         self.worker_state = "READY"
         self.mark_listener_ready()
+
+    def _presence_instance_id(self) -> str:
+        return f"dragon3d-{os.getpid()}"
+
+    def _register_with_presence_authority(self) -> None:
+        """Registers this worker's actual configured provider/model — read
+        from self.client, never hardcoded here — with the shared
+        cross-process presence authority (tier1/engainos/server/
+        presence_authority_server.py in the EngAIn checkout), so the 2D
+        worker sharing the same session_id can see this one exists and both
+        can CLAIM/RELEASE around dispatch instead of racing it blind.
+
+        Fail-open, deliberately: this worker must keep functioning exactly
+        as it does today if the authority server isn't running (it isn't
+        part of this project's normal startup yet). What actually protects
+        against a real concurrent dispatch is the CLAIM call in
+        _process_claimed_request, which only fails open on an unreachable
+        authority — a genuine SESSION_OCCUPIED response is never ignored.
+        """
+        try:
+            presence_authority_client.register(
+                agent_id="hermes",
+                instance_id=self._presence_instance_id(),
+                session_id=self.client.session_id,
+                capabilities=["chat"],
+                endpoint=json.dumps({"provider": self.client.provider, "model": self.client.model}),
+                requested_lease=300.0,
+            )
+        except presence_authority_client.PresenceAuthorityError as exc:
+            if _presence_authority_fail_open_compat_enabled():
+                print(
+                    f"[presence] register unavailable, "
+                    f"{_PRESENCE_AUTHORITY_FAIL_OPEN_COMPAT_ENV}=1 set, continuing unprotected: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return
+            raise HermesAdapterError(
+                f"PRESENCE_AUTHORITY_UNAVAILABLE: cannot register with the shared presence authority "
+                f"({exc}); refusing to start without claim protection. Set "
+                f"{_PRESENCE_AUTHORITY_FAIL_OPEN_COMPAT_ENV}=1 for temporary unprotected operation."
+            ) from exc
+
+    def _acquire_dispatch_claim(self) -> str | None:
+        """Called immediately before dispatching to Hermes. Returns a
+        claim_token to release after dispatch, or None if the presence
+        authority was unreachable (fail-open — see
+        _register_with_presence_authority's docstring for the same
+        trade-off). Raises SessionOccupied only for a genuine competing
+        claim from a real other worker instance, which callers must treat
+        as a hard stop, not a warning."""
+        try:
+            result = presence_authority_client.claim(
+                session_id=self.client.session_id,
+                agent_id="hermes",
+                instance_id=self._presence_instance_id(),
+                lease_seconds=MAX_HERMES_TIMEOUT_SECONDS + 20.0,
+            )
+            return cast(str, result["claim_token"])
+        except presence_authority_client.SessionOccupied:
+            raise
+        except presence_authority_client.PresenceAuthorityError:
+            if _presence_authority_fail_open_compat_enabled():
+                print(
+                    f"[presence] claim unavailable, "
+                    f"{_PRESENCE_AUTHORITY_FAIL_OPEN_COMPAT_ENV}=1 set, proceeding without lock",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return None
+            raise
+
+    def _release_dispatch_claim(self, claim_token: str | None) -> None:
+        if claim_token is None:
+            return
+        try:
+            presence_authority_client.release(self.client.session_id, claim_token)
+        except presence_authority_client.PresenceAuthorityError as exc:
+            print(
+                f"[presence] release failed, claim will expire naturally: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
 
     def request_stop(self) -> None:
         """Request an idle worker stop without admitting further mailbox work."""
@@ -1654,6 +1753,38 @@ class HermesSessionAdapter:
                 )
                 return True
 
+        try:
+            claim_token = self._acquire_dispatch_claim()
+        except presence_authority_client.SessionOccupied as exc:
+            safe_response = self._error_response(
+                "Another EngAIn body is currently speaking with Hermes. Please try again shortly.",
+                request_id,
+                client_request_id,
+                perception=validated.perception,
+                failure_code="SESSION_OCCUPIED",
+            )
+            print(f"[presence] SESSION_OCCUPIED for {request_id}: {exc}", file=sys.stderr, flush=True)
+            self._write_response(safe_response)
+            self._record_processed_request(request_id)
+            self._release_request_reservation(request_id)
+            print(f"Processed EngAIn request: {request_id}", flush=True)
+            return True
+        except presence_authority_client.PresenceAuthorityError as exc:
+            safe_response = self._error_response(
+                "EngAIn's shared presence authority is unreachable; refusing to dispatch without "
+                "exclusive-claim protection.",
+                request_id,
+                client_request_id,
+                perception=validated.perception,
+                failure_code="PRESENCE_AUTHORITY_UNAVAILABLE",
+            )
+            print(f"[presence] PRESENCE_AUTHORITY_UNAVAILABLE for {request_id}: {exc}", file=sys.stderr, flush=True)
+            self._write_response(safe_response)
+            self._record_processed_request(request_id)
+            self._release_request_reservation(request_id)
+            print(f"Processed EngAIn request: {request_id}", flush=True)
+            return True
+
         self.client.pending_perception = validated.perception
         try:
             response = director_bridge.process_player_input(
@@ -1684,6 +1815,7 @@ class HermesSessionAdapter:
             self.client.pending_perception = None
             self.client.pending_prepared_image = None
             self.client.pending_prepared_contract_command = None
+            self._release_dispatch_claim(claim_token)
 
         self._write_response(safe_response)
         self._record_processed_request(request_id)
