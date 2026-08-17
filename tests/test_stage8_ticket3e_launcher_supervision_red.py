@@ -114,6 +114,15 @@ class GodotProcessDouble:
         return self.exit_code
 
 
+def _fake_godot_terminator(process: GodotProcessDouble, shutdown_budget_seconds: float) -> int:
+    """None of these tests interrupt godot_process.wait(), so this is never
+    actually invoked — it exists only because run_runtime_generation now
+    requires an injected terminator (the Godot-orphan-on-interrupt fix).
+    See test_launcher_interrupt_lifecycle.py for the tests that actually
+    exercise this path."""
+    return process.exit_code
+
+
 def _run(
     module: ModuleType,
     worker_factory: Callable[[], WorkerDouble],
@@ -124,6 +133,7 @@ def _run(
     return module.run_runtime_generation(
         worker_factory=worker_factory,
         godot_launcher=godot_launcher,
+        godot_terminator=_fake_godot_terminator,
         shutdown_budget_seconds=shutdown_budget_seconds,
     )
 

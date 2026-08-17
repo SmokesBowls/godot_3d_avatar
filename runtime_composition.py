@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import signal
 import sys
 import time
 import urllib.error
@@ -14,7 +15,11 @@ import threading
 from typing import Any, Callable, Optional, Protocol, Sequence, cast
 
 from hermes_session_adapter import AdapterConfig, HermesSessionAdapter, PidFileLock
-from runtime_launcher import LauncherSupervisionError, run_runtime_generation
+from runtime_launcher import (
+    LauncherSupervisionError,
+    ShutdownRequested,
+    run_runtime_generation,
+)
 
 
 COMPOSITION_MARKER = "ENGAV3D_STAGE8_TICKET3F_CONCRETE_RUNTIME_COMPOSITION_V1"
@@ -177,6 +182,32 @@ def create_godot_process(command: str, project_dir: Path) -> subprocess.Popen[by
     return subprocess.Popen([command, "--path", str(project_dir)])
 
 
+def terminate_and_reap_godot(process: subprocess.Popen[bytes], shutdown_budget_seconds: float) -> int:
+    """The exact-child-only, always-reaped Godot shutdown this launcher was
+    missing: request graceful termination, wait a bounded time, escalate to
+    a forced kill only if still alive, and always call wait() so no zombie
+    remains.
+
+    Operates only on the one Popen object this launcher itself created via
+    create_godot_process() — never a PID/name lookup, never a process
+    group, so it can never reach a process this generation didn't start.
+
+    Idempotent by construction: subprocess.Popen caches returncode after
+    the first successful wait()/poll(), so calling this again (already
+    exited, already killed, or called a second time by mistake) just
+    returns that cached code immediately rather than erroring or trying to
+    signal an already-reaped process."""
+    if process.poll() is not None:
+        return process.wait()
+
+    process.terminate()  # graceful: SIGTERM
+    try:
+        return process.wait(timeout=shutdown_budget_seconds)
+    except subprocess.TimeoutExpired:
+        process.kill()  # forced: SIGKILL, only after the graceful attempt timed out
+        return process.wait(timeout=shutdown_budget_seconds)
+
+
 def _real_adapter(project_dir: Path) -> HermesSessionAdapter:
     return HermesSessionAdapter(AdapterConfig(project_dir=project_dir))
 
@@ -211,17 +242,25 @@ def run_concrete_runtime(
     ownership_factory: Callable[[Path], Ownership] = _real_ownership,
     service_factory: Callable[[Adapter], Service] = _real_service,
     godot_process_factory: Callable[[str, Path], Any] = create_godot_process,
+    godot_terminator: Callable[[Any, float], int] = terminate_and_reap_godot,
     presence_authority_factory: Callable[[], Optional[AuthorityProcess]] = lambda: None,
     presence_authority_ready_timeout_seconds: float = 15.0,
 ) -> int:
     """Own and supervise exactly one concrete worker/Godot generation.
 
-    Shutdown order (per the operationalization step that added this):
-    worker reaches STOPPED (which itself releases any outstanding claim
-    inside hermes_session_adapter's own request_stop/close path) before the
-    presence authority is stopped — never the other way around, or a
-    worker mid-shutdown could lose claim protection while still able to
-    dispatch.
+    Shutdown order, both on normal exit and on interruption
+    (SIGINT/SIGTERM, both funneled through main()'s signal handling into
+    KeyboardInterrupt/ShutdownRequested): stop worker → release session/
+    presence (a consequence of stopping the worker — its service loop
+    finishes its current cycle before request_stop() returns, which is
+    exactly where hermes_session_adapter.py's own dispatch finally block
+    releases any held claim) → terminate and reap the exact Godot child
+    this generation launched (run_runtime_generation's job, on
+    interruption only — a normal exit has nothing left to terminate) →
+    release ownership → stop the presence authority, last. Never the
+    reverse: a worker or Godot process still alive after the authority
+    stops could dispatch, or fail to release a claim, with nothing left
+    enforcing exclusivity.
     """
     if shutdown_budget_seconds <= 0:
         raise ValueError("shutdown bound must be positive")
@@ -241,6 +280,7 @@ def run_concrete_runtime(
         return run_runtime_generation(
             worker_factory=cast(Any, lambda: worker),
             godot_launcher=lambda: godot_process_factory(godot_command, project_dir),
+            godot_terminator=godot_terminator,
             shutdown_budget_seconds=shutdown_budget_seconds,
         )
     finally:
@@ -283,20 +323,39 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _raise_shutdown_requested(signum: int, frame: Any) -> None:
+    raise ShutdownRequested()
+
+
 def main(argv: Sequence[str] | None = None) -> int:
+    """Catches SIGINT (via Python's default KeyboardInterrupt) and SIGTERM
+    (via the handler installed below, which raises ShutdownRequested — the
+    same exception shape, deliberately, so both signals funnel through the
+    exact same shutdown path in run_runtime_generation/run_concrete_runtime)
+    through one path, and preserves the interruption's exit status as the
+    conventional 128+signum rather than letting an uncaught exception print
+    a traceback and return a generic failure code."""
     args = parse_args(argv)
-    return run_concrete_runtime(
-        project_dir=args.project_dir,
-        godot_command=args.godot_command,
-        shutdown_budget_seconds=args.shutdown_budget,
-        presence_authority_factory=lambda: _real_presence_authority(
-            args.presence_authority_script,
-            args.presence_authority_python,
-            args.presence_authority_host,
-            args.presence_authority_port,
-        ),
-        presence_authority_ready_timeout_seconds=args.presence_authority_ready_timeout,
-    )
+    previous_sigterm_handler = signal.signal(signal.SIGTERM, _raise_shutdown_requested)
+    try:
+        return run_concrete_runtime(
+            project_dir=args.project_dir,
+            godot_command=args.godot_command,
+            shutdown_budget_seconds=args.shutdown_budget,
+            presence_authority_factory=lambda: _real_presence_authority(
+                args.presence_authority_script,
+                args.presence_authority_python,
+                args.presence_authority_host,
+                args.presence_authority_port,
+            ),
+            presence_authority_ready_timeout_seconds=args.presence_authority_ready_timeout,
+        )
+    except KeyboardInterrupt:
+        return 128 + signal.SIGINT
+    except ShutdownRequested:
+        return 128 + signal.SIGTERM
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm_handler)
 
 
 if __name__ == "__main__":

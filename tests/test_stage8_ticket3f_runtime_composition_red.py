@@ -17,8 +17,16 @@ TICKET3E_MARKER = "ENGAV3D_STAGE8_TICKET3E_LAUNCHER_SUPERVISION_V1"
 RUNTIME_LAUNCHER = PROJECT_ROOT / "runtime_launcher.py"
 ADAPTER_PATH = PROJECT_ROOT / "hermes_session_adapter.py"
 TICKET3E_TEST = PROJECT_ROOT / "tests" / "test_stage8_ticket3e_launcher_supervision_red.py"
-RUNTIME_LAUNCHER_SHA256 = "e2388f74953a452f5626565fcde7d6e5abc4c92eb01187570d9cf03abd62ec96"
-TICKET3E_TEST_SHA256 = "c89aa2153d2a7bb1db50a6b1cf901ef8cefa655f8d0244a1911b56e26e78d68d"
+# Re-sealed 2026-08-16: runtime_launcher.py gained ShutdownRequested and the
+# godot_terminator parameter (Godot-orphan-on-interrupt fix — SIGINT/SIGTERM
+# now terminate and reap the exact Godot child, in the stop-worker-then-
+# terminate-Godot order, instead of leaving it running after the launcher
+# exits). test_stage8_ticket3e_launcher_supervision_red.py was updated to
+# supply the newly-required parameter. Both byte-preservation hashes below
+# were deliberately recomputed against the new, reviewed contents — not
+# silently regenerated to make a failing assertion pass.
+RUNTIME_LAUNCHER_SHA256 = "ba88762e72f0b29074c0cffc99b227349a064710639b84fc5a2698a531111a2c"
+TICKET3E_TEST_SHA256 = "d7bc24c89b0ebcfc766e6b207ea1a7195c649034033f076d811e5a7f5647b270"
 PROTECTED_GODOT_PATHS = (
     PROJECT_ROOT / "scripts" / "EngAInBridge3D.gd",
     PROJECT_ROOT / "scripts" / "ControlHUD.gd",
