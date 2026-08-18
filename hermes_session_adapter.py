@@ -130,6 +130,25 @@ class HermesTimeoutError(HermesAdapterError):
     """Raised when the Hermes subprocess exceeds its configured timeout."""
 
 
+class ListenerAbsentError(HermesAdapterError):
+    """publish_request()'s LISTENER_ABSENT, carrying a structured diagnostic
+    alongside the unchanged str(exc) message every existing caller/test
+    already matches against. Callers that only know HermesAdapterError see
+    nothing different; callers that want the structured fields (the CLI's
+    --publish-request handler, ultimately the Godot HUD) read .diagnostic
+    instead of re-parsing the message string.
+
+    The diagnostic's launcher/recovery_action fields point at
+    launch_dragon3d.sh — the one process that actually owns starting this
+    worker (see runtime_composition.py) — computed here, in the runtime
+    that owns that relationship, specifically so nothing downstream (least
+    of all GDScript) has to know or guess how this project is launched."""
+
+    def __init__(self, diagnostic: dict[str, str]) -> None:
+        super().__init__("LISTENER_ABSENT: no live mailbox worker")
+        self.diagnostic = diagnostic
+
+
 class PerceptionValidationError(ValueError):
     """Fail-closed perception rejection with a stable evidence code."""
 
@@ -1570,6 +1589,17 @@ class HermesSessionAdapter:
             json.dumps(payload, separators=(",", ":")) + "\n",
         )
 
+    def _listener_absent_diagnostic(self) -> dict[str, str]:
+        launcher = str(self.config.project_dir / "launch_dragon3d.sh")
+        return {
+            "code": "LISTENER_ABSENT",
+            "agent_id": CALLER_ID,
+            "mailbox_path": str(self.config.listener_file.parent),
+            "presence_state": "ABSENT",
+            "launcher": launcher,
+            "recovery_action": f"Start the dragon_3d runtime: {launcher}",
+        }
+
     def _listener_is_live(self, *, now: float) -> bool:
         try:
             payload = _strict_json_loads(self.config.listener_file.read_text(encoding="utf-8"))
@@ -1616,7 +1646,7 @@ class HermesSessionAdapter:
         payload = _strict_json_loads(temporary_path.read_text(encoding="utf-8"))
         self._validate_request(payload, validation_time=current)
         if not self._listener_is_live(now=current):
-            raise HermesAdapterError("LISTENER_ABSENT: no live mailbox worker")
+            raise ListenerAbsentError(self._listener_absent_diagnostic())
         try:
             os.link(temporary_path, request_path, follow_symlinks=False)
         except FileExistsError as exc:
@@ -3003,6 +3033,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             HermesSessionAdapter(AdapterConfig(project_dir=MAILBOX_PROJECT_ROOT)).publish_request(
                 Path(effective_argv[1])
             )
+        except ListenerAbsentError as exc:
+            # One extra, structured line ahead of the existing plain-text
+            # one, so callers that only ever read the plain-text line (any
+            # existing test/tooling) see no change, and callers that parse
+            # for this specific marker (EngAInBridge3D.gd) can render an
+            # actionable diagnostic instead of a bare error string.
+            print(
+                f"ENGAIN_LISTENER_ABSENT_DIAGNOSTIC={json.dumps(exc.diagnostic, separators=(',', ':'))}",
+                file=sys.stderr,
+                flush=True,
+            )
+            print(f"request publication rejected: {exc}", file=sys.stderr, flush=True)
+            return 1
         except (OSError, UnicodeDecodeError, ValueError, HermesAdapterError) as exc:
             print(f"request publication rejected: {exc}", file=sys.stderr, flush=True)
             return 1

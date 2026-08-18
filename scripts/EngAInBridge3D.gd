@@ -24,6 +24,13 @@ const POLL_INTERVAL_SEC := 0.1
 const MAILBOX_BUSY := "MAILBOX_BUSY"
 const MAILBOX_STALE := "MAILBOX_STALE"
 const LISTENER_ABSENT := "LISTENER_ABSENT"
+# hermes_session_adapter.py's --publish-request handler prints this marker,
+# followed by a JSON diagnostic, on ListenerAbsentError specifically. This
+# HUD only ever reads that marker and renders whatever fields it contains —
+# it never decides on its own how the worker should be started; the
+# adapter (which lives beside launch_dragon3d.sh and actually owns that
+# relationship) is the one computing the recovery/launcher fields.
+const LISTENER_ABSENT_DIAGNOSTIC_MARKER := "ENGAIN_LISTENER_ABSENT_DIAGNOSTIC="
 const REQUEST_SCHEMA: Array[String] = [
 	"call_id",
 	"expires_at",
@@ -313,7 +320,7 @@ func submit(text: String) -> void:
 	var publication := _execute_adapter(PackedStringArray(["--publish-request", temporary_path]))
 	if publication["code"] != 0 or not publication["output"].contains("ENGAIN_REQUEST_PUBLISHED=1"):
 		_end_active_lifecycle()
-		_emit_err("Request publication failed: " + publication["output"])
+		_emit_err(_render_publication_failure(publication["output"]))
 		return
 
 	_active_request_id = request_id
@@ -701,6 +708,30 @@ func _execute_adapter(arguments: PackedStringArray) -> Dictionary:
 	for item in output:
 		combined += str(item)
 	return {"code": code, "output": combined.strip_edges()}
+
+
+func _render_publication_failure(output: String) -> String:
+	# The adapter's diagnostic line, if present, always sits alongside its
+	# existing plain-text "request publication rejected: ..." line in the
+	# same captured output — look for it, but fall back to the raw output
+	# verbatim (unchanged from before this diagnostic existed) for any
+	# failure this HUD doesn't specifically know how to explain.
+	for line in output.split("\n"):
+		if not line.begins_with(LISTENER_ABSENT_DIAGNOSTIC_MARKER):
+			continue
+		var payload := line.substr(LISTENER_ABSENT_DIAGNOSTIC_MARKER.length())
+		var parser := JSON.new()
+		if parser.parse(payload) != OK:
+			continue
+		var parsed: Variant = parser.data
+		if typeof(parsed) == TYPE_DICTIONARY and parsed.has("code") and parsed.has("recovery_action"):
+			return (
+				"[%s] no live mailbox worker for '%s'.\n" % [parsed.get("code"), parsed.get("agent_id", "?")]
+				+ "Mailbox: %s\n" % parsed.get("mailbox_path", "?")
+				+ "Presence lease: %s\n" % parsed.get("presence_state", "?")
+				+ "To fix: %s" % parsed.get("recovery_action", "?")
+			)
+	return "Request publication failed: " + output
 
 
 func _set_lifecycle_status(status: String) -> void:
