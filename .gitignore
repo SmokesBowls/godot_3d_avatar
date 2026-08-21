@@ -55,3 +55,4 @@ venv/
 # EngAIn local runtime mailboxes
 /engain_request.json
 /engain_response.json
+/.hermes_scratch/

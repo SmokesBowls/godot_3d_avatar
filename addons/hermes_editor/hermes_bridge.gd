@@ -123,6 +123,49 @@ static func project_root() -> String:
 	return ProjectSettings.globalize_path("res://")
 
 
+## TEARDOWN — proven necessary, not speculative (real, executed
+## three-case investigation before this was written): freeing this Node
+## while `_thread` is still alive (e.g. the editor closes, or the dock
+## is disabled, while a Hermes turn is genuinely still in flight) left
+## the background thread orphaned. Godot's own Thread destructor does
+## NOT block/join a still-running thread — it prints "A Thread object
+## is being destroyed without its completion having been realized" and
+## effectively detaches it. The orphaned thread then runs to its own
+## natural completion (the real OS.execute() call it's blocked on) with
+## `self` already destroyed, and crashes with "Cannot call method
+## 'call_deferred' on a previously freed instance" the moment
+## _run_hermes() reaches its own final line. Reproduced directly, twice
+## (once for the warning alone on an already-finished thread, once for
+## the full crash on a genuinely in-flight one) before this handler was
+## added.
+##
+## Fix: block on NOTIFICATION_PREDELETE until the thread's own function
+## body has actually returned. NOTIFICATION_PREDELETE fires BEFORE the
+## object's memory is actually reclaimed, so `_run_hermes()`'s own
+## `call_deferred("_emit_result", ...)` — its very last line — executes
+## against a still-valid `self`, and by the time this handler returns
+## and the object is actually destroyed, the thread is already properly
+## joined (no warning) and its one remaining deferred call has already
+## been safely queued.
+##
+## Deliberately NOT process-killing: per instruction, don't add
+## aggressive termination of the wrapper/Hermes child process without
+## first knowing the exact process tree it creates — killing the
+## wrapper while leaving a Hermes subprocess (or vice versa) orphaned
+## would be worse than the problem being fixed. Blocking is the
+## conservative choice already established by Stop's own semantics
+## ("let it finish, don't try to kill it") — applied here to teardown
+## as well. Practical consequence, stated plainly for the README: if
+## the editor is closed (or the plugin disabled) while a turn is
+## genuinely in flight, teardown WAITS for that turn to finish first —
+## it does not hang forever (bounded by however long the real
+## hermes/model call takes), but it is not instant either.
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_PREDELETE:
+		if _thread != null and _thread.is_started():
+			_thread.wait_to_finish()
+
+
 ## Starts one turn in a background thread — OS.execute() blocks, and a
 ## real Hermes call can take several seconds to minutes; running it on
 ## the main thread would freeze the whole editor UI, not just this dock.

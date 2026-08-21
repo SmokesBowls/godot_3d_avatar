@@ -1,4 +1,4 @@
-# Hermes Editor (First Milestone)
+# Hermes Editor (Phase 1: SAFE/REVIEW — COMPLETE)
 
 A real Hermes agent seated inside the Godot editor. This is the "editor
 Dragon" — the third embodiment alongside the 2D and 3D runtime dragons —
@@ -150,14 +150,74 @@ the bridge itself does not quietly mutate the live repository as a side
 effect of every message sent, since that would be an unstated exception
 to this whole mode's own "proposals only" contract.
 
+## Process/thread teardown — proven, not assumed (2026-08-21)
+
+Three distinct teardown scenarios were investigated for real before
+Phase 1 was called complete, per review: "Stop works" and "the plugin
+tears down cleanly" are not the same claim, and neither should be
+trusted without evidence. See `live_teardown_proof.gd` (spawns each
+case as a genuinely separate `godot --headless` subprocess and asserts
+on real stdout/stderr, wall-clock timing, and process survival) and the
+three `_teardown_case*.gd` files it drives.
+
+**Case 1 — a normal completed turn, then the dock is torn down.**
+Before this investigation, this silently printed Godot's own `A Thread
+object is being destroyed without its completion having been realized`
+warning on every single ordinary use — nothing in the bridge ever
+explicitly joined a thread once its work was done, only when a *new*
+turn was about to start. Fixed: `hermes_bridge.gd` now has a
+`_notification(NOTIFICATION_PREDELETE)` handler that calls
+`_thread.wait_to_finish()` whenever the bridge is destroyed. For an
+already-finished thread this returns instantly. **GREEN.**
+
+**Case 2 — Stop pressed during an active turn.** Confirmed directly,
+not assumed: **Stop does not kill the process.** There is no
+cooperative cancellation for a synchronous `OS.execute()` call, and no
+PID is exposed to signal — pressing Stop only sets a flag that
+discards the eventual result; the real `hermes`/wrapper-script process
+was observed still running immediately after Stop was pressed, and ran
+to its own natural completion regardless. This is the accepted, honest
+behavior for Phase 1 (matching the sibling `godot_ollama_task_
+performer` addon's own `run_scene` "proof-of-launch only" precedent) —
+not a bug, and not silently reinterpreted into something it isn't. Once
+the process finishes naturally, the same PREDELETE fix above ensures a
+later teardown is still clean. **GREEN.**
+
+**Case 3 — the dock is torn down while a turn is GENUINELY still in
+flight** (the real consequence of closing the editor, or disabling this
+plugin, mid-turn). This is the case that actually mattered. Before the
+fix: freeing the bridge Node while its background thread was still
+alive orphaned that thread — Godot does not auto-join a still-running
+thread on destruction, it only warns. The orphaned thread then ran to
+its own natural completion (the real, still-in-progress `OS.execute()`
+call) with `self` already destroyed, and crashed with `Cannot call
+method 'call_deferred' on a previously freed instance` the moment
+`_run_hermes()` reached its own final line — a guaranteed, reproducible
+error on every real "close the editor while Hermes is still answering"
+sequence. Reproduced directly, twice, before any fix was written.
+
+**Fix and its honest cost**: the same `NOTIFICATION_PREDELETE` handler
+blocks until the thread's function body has actually returned, *before*
+allowing the object to be destroyed — this was deliberately chosen over
+killing the wrapper/Hermes child process, since (per instruction) doing
+that without first knowing the exact process tree it creates risks
+leaving one half of that tree orphaned while killing the other.
+Blocking is also consistent with Stop's own already-established
+philosophy: let the real work finish, never try to kill it. **The
+consequence is real and worth knowing**: closing the editor (or
+disabling this plugin) while a turn is genuinely in flight makes
+teardown *wait* for that turn to finish — proven directly, including a
+wall-clock timing assertion (`live_teardown_proof.gd`'s own Case 3)
+that this is a genuine block, not a skipped no-op. Since a real Hermes
+turn has been observed taking well over two minutes end-to-end in this
+project, closing the editor at the wrong moment can mean a visibly
+frozen editor for that long — not a crash, not data loss, but not
+instant either. No timeout/fallback exists yet; not added here per
+instruction not to introduce further process-killing logic without more
+research. **GREEN**, with this cost documented rather than hidden.
+
 ## Known limitations
 
-- **Stop doesn't kill the process.** There is no cooperative
-  cancellation for a synchronous `OS.execute()` call, and no PID is
-  exposed to signal. "Stop" discards the eventual reply when it
-  arrives; the underlying `hermes` subprocess runs to completion
-  regardless. Same honesty convention as the sibling addon's own
-  `run_scene` "proof-of-launch only" limitation.
 - **Linux-only as written.** The temp-file/wrapper-script approach uses
   `/bin/bash` explicitly. A Windows build of this dock would need a
   separate code path — not exercised anywhere in this project.
@@ -168,6 +228,8 @@ to this whole mode's own "proposals only" contract.
   directory for Hermes's file/shell tools.
 - **No streaming.** Each turn is one blocking `hermes chat -Q -q "..."`
   call in a background thread; there is no live token-by-token display.
+- **Closing the editor mid-turn blocks until Hermes finishes** — see
+  "Process/thread teardown" above. No bounded timeout exists yet.
 
 ## Installation
 
@@ -175,13 +237,16 @@ Same as the sibling addon: place at `res://addons/hermes_editor/`, then
 **Project > Project Settings > Plugins**, enable "Hermes Editor". A
 "Hermes" dock appears in the bottom panel.
 
-## Verifying the fix independently
+## Verifying the fixes independently
 
 ```bash
 cd <this project's root>
 godot --headless --check-only -s addons/hermes_editor/<any .gd file>   # syntax
-godot --headless -s addons/hermes_editor/test_hermes_bridge_logic.gd   # real, executed logic + injection-safety proof
+godot --headless -s addons/hermes_editor/test_hermes_bridge_logic.gd   # real, executed logic + injection-safety + safe-mode-audit proof
+godot --headless -s addons/hermes_editor/live_teardown_proof.gd        # real, subprocess-based process/thread teardown proof
 ```
 
-Neither of those opens the editor UI or calls a real Hermes/LLM — they
-prove the plumbing, not the seat itself.
+None of those open the editor UI or call a real Hermes/LLM — they prove
+the plumbing, not the seat itself. The live-editor milestone (a human
+opening the real Godot editor and getting a real reply) was verified by
+hand, separately — see above.
