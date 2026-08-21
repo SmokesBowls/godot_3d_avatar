@@ -25,6 +25,32 @@ func run(editor_interface: Object) -> Dictionary:
 	
 	return result
 
+## Safe display label for an arbitrary signal-connection endpoint.
+## get_object() on a Signal/Callable is NOT guaranteed to return a Node —
+## a Resource (e.g. a MeshInstance3D's PlaneMesh, an AnimatedSprite2D's
+## SpriteFrames) can just as legitimately be a connection's source or
+## target, and Resource has no .name property (Node does; Resource's own
+## analog is resource_name, a different property) — accessing .name on
+## one crashes. Handles Node and Resource explicitly, and falls back to
+## the object's class name for anything else, since get_object() can in
+## principle return any Object, not just those two.
+func _object_label(obj: Object) -> String:
+	if obj == null:
+		return "Unknown"
+
+	if obj is Node:
+		return str(obj.name)
+
+	if obj is Resource:
+		var resource := obj as Resource
+		if not resource.resource_name.is_empty():
+			return resource.resource_name
+		if not resource.resource_path.is_empty():
+			return resource.resource_path.get_file()
+
+	return obj.get_class()
+
+
 func _inspect_node(node: Node, root: Node) -> Dictionary:
 	var node_info = {
 		"name": node.name,
@@ -32,12 +58,12 @@ func _inspect_node(node: Node, root: Node) -> Dictionary:
 		"class": node.get_class(),
 		"script_path": ""
 	}
-	
+
 	# Get script reference
 	var script = node.get_script()
 	if script is Script:
 		node_info["script_path"] = script.resource_path
-		
+
 	# Get incoming signal connections
 	var connections = []
 	for conn in node.get_incoming_connections():
@@ -46,12 +72,12 @@ func _inspect_node(node: Node, root: Node) -> Dictionary:
 		if sig and callable:
 			var source = sig.get_object()
 			var target = callable.get_object()
-			
+
 			var conn_dict = {
 				"signal_name": sig.get_name(),
-				"source_name": source.name if source else "Unknown",
+				"source_name": _object_label(source),
 				"source_path": str(root.get_path_to(source)) if source is Node and root.is_ancestor_of(source) else "",
-				"target_name": target.name if target else "Unknown",
+				"target_name": _object_label(target),
 				"target_path": str(root.get_path_to(target)) if target is Node and root.is_ancestor_of(target) else "",
 				"method": callable.get_method()
 			}
