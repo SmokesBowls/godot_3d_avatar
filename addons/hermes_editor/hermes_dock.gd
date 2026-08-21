@@ -22,6 +22,7 @@ var _stop_button: Button
 var _status_label: Label
 var _model_input: LineEdit
 var _provider_input: LineEdit
+var _mode_selector: OptionButton
 
 
 func _ready() -> void:
@@ -29,6 +30,11 @@ func _ready() -> void:
 	_bridge = HermesBridgeScript.new()
 	add_child(_bridge)
 	_bridge.turn_finished.connect(_on_turn_finished)
+	# Install-time-only scratch setup (creates .hermes_scratch/, adds it
+	# to .gitignore) — runs once here, when the plugin activates, NOT
+	# per-turn inside the bridge. See hermes_bridge.gd's own doc on
+	# _ensure_scratch_setup() for why this was moved out of _run_hermes().
+	HermesBridgeScript._ensure_scratch_setup(HermesBridgeScript.project_root())
 	_status_label.text = "Ready. cwd = " + HermesBridgeScript.project_root()
 
 
@@ -38,6 +44,26 @@ func _build_ui() -> void:
 	root.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	root.custom_minimum_size = Vector2(0, 280)
 	add_child(root)
+
+	# Explicit mode indicator — per review instruction, don't rely on
+	# Hermes merely being told "don't edit"; make the mode a visible,
+	# structural part of the harness. Only SAFE/REVIEW is implemented;
+	# DIRECT WRITE is listed and disabled on purpose, as a stated future
+	# phase, not silently absent — see hermes_bridge.gd's own top-of-file
+	# doc for the full phased-rollout rationale.
+	var mode_row := HBoxContainer.new()
+	root.add_child(mode_row)
+	var mode_label := Label.new()
+	mode_label.text = "Mode:"
+	mode_row.add_child(mode_label)
+	_mode_selector = OptionButton.new()
+	_mode_selector.add_item("SAFE / REVIEW — proposals only, in .hermes_scratch/", 0)
+	_mode_selector.add_item("DIRECT WRITE (not available yet)", 1)
+	_mode_selector.set_item_disabled(1, true)
+	_mode_selector.select(0)
+	_mode_selector.disabled = true  # nothing to switch to yet; still shown so the mode is never ambiguous
+	_mode_selector.tooltip_text = "Hermes can read/search/run-shell/run-tests freely. Code changes go to .hermes_scratch/ for human review — never directly into the live project. See hermes_bridge.gd's SAFE/REVIEW MODE doc."
+	mode_row.add_child(_mode_selector)
 
 	var config_row := HBoxContainer.new()
 	root.add_child(config_row)
@@ -70,7 +96,7 @@ func _build_ui() -> void:
 	root.add_child(input_row)
 
 	_input = LineEdit.new()
-	_input.placeholder_text = "Message Hermes... (native tools: files, shell, search, tests)"
+	_input.placeholder_text = "Message Hermes... (native tools: files, shell, search, tests — proposals go to .hermes_scratch/)"
 	_input.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_input.text_submitted.connect(func(_new_text: String) -> void: _on_send_pressed())
 	input_row.add_child(_input)
@@ -117,17 +143,30 @@ func _on_turn_finished(result: Dictionary) -> void:
 	_send_button.disabled = false
 	_stop_button.disabled = true
 
+	# Safe-mode audit — checked FIRST and regardless of success/error,
+	# since a live-tree violation matters even on an otherwise-failed
+	# turn. This is the "not just being told" enforcement: an automated
+	# check against real `git status`, not trust in Hermes's own
+	# compliance. See hermes_bridge.gd's diff_live_tree_changes().
+	var violations: PackedStringArray = result.get("live_tree_changes", PackedStringArray())
+	if not violations.is_empty():
+		var warning := "⚠ SAFETY VIOLATION — live project file(s) changed outside .hermes_scratch/ this turn:\n"
+		for v in violations:
+			warning += "    " + String(v) + "\n"
+		warning += "  Review with `git diff` / `git status` before trusting anything else this session did."
+		_append_transcript(warning)
+	elif not result.get("safety_check_available", false):
+		_append_transcript("⚠ Safe-mode audit unavailable this turn (not a git repo, or git not found) — changes were NOT verified. Check manually.")
+
 	if not result.get("success", false):
 		_append_transcript("[error] " + String(result.get("error", "unknown error")))
-		_status_label.text = "Error — see transcript."
+		_status_label.text = "Error — see transcript." if violations.is_empty() else "SAFETY VIOLATION + error — see transcript."
 		return
 
 	_append_transcript("hermes: " + String(result.get("response", "")))
 	var sid := String(result.get("session_id", ""))
-	if sid.is_empty():
-		_status_label.text = "Ready. (no session_id reported this turn)"
-	else:
-		_status_label.text = "Ready. session=" + sid
+	var base_status := "Ready. session=%s" % sid if not sid.is_empty() else "Ready. (no session_id reported this turn)"
+	_status_label.text = ("⚠ SAFETY VIOLATION last turn — " + base_status) if not violations.is_empty() else base_status
 
 
 func _append_transcript(line: String) -> void:

@@ -39,15 +39,36 @@ That, and only that. Deliberately **not** done in this pass:
   whatever it always has (file/shell/search/test) because nothing
   constrains it.
 
-**What is NOT proven by this repo's own test suite**: that Hermes
-actually sits inside a real, running Godot editor and can inspect/edit
-the real project. That requires a human: enable the plugin, open the
-"Hermes" bottom dock, type a message, confirm a real reply arrives. The
-logic this addon's own code is responsible for (command construction,
-output parsing, safe message delivery — see `test_hermes_bridge_logic.gd`)
-is covered by a real, executed test; the editor-embedded, live-Hermes
-part is not, and should not be reported as proven until someone does
-that by hand.
+**Live-editor milestone: PROVEN, by hand, 2026-08-21.** The plugin
+loads in a real Godot editor session, the "Hermes" dock appears, a real
+Hermes session starts, and a real reply arrives through the dock. A
+real cwd-reliability investigation (below) also confirmed Hermes's
+native shell tool genuinely executes and reports the correct project
+directory — 8/8 real runs across both `engain_avatar` and
+`godot_engain_3d_avatar`, once a capable default model was configured
+(see "Model reliability" below). Logic this addon's own code is
+responsible for (command construction, output parsing, safe message
+delivery, safe-mode enforcement — see `test_hermes_bridge_logic.gd`) is
+covered by a real, executed test suite in addition to the live-editor
+proof.
+
+### Model reliability — a real finding, not a bridge defect
+
+During the first live-editor pass, asking Hermes "what directory are
+you in?" produced inconsistent answers, and a follow-up request to run
+`pwd` via the shell tool sometimes returned only the *text* `pwd`
+instead of executing it. This looked like a launch-boundary bug and was
+investigated as one first — the bridge's own `cd` mechanism was
+independently verified correct via a synthetic stand-in before any code
+was touched. The actual cause: `~/.hermes/config.yaml`'s default model
+was a small local `qwen3.5` (via Ollama), which was unreliable at tool
+calling — sometimes narrating a shell command as text instead of
+running it, sometimes reporting a plausible-but-wrong cwd. Configuring
+`hermes config set model.provider openai-codex` /
+`model.default gpt-5.6-sol` fixed it completely — 5/5 identical runs,
+zero code changes to this bridge. **If Hermes in this dock seems to
+"not really do anything," check `hermes status`'s reported model before
+suspecting this addon.**
 
 ## Security note — read before changing how a message reaches Hermes
 
@@ -76,6 +97,58 @@ expansion to find.
 If this bridge is ever rewritten to pass content through `OS.execute()`
 differently, re-run (or extend) `test_hermes_bridge_logic.gd`'s
 adversarial check before trusting it.
+
+## SAFE/REVIEW mode — the only mode this addon implements
+
+Per deliberate design decision (not a limitation to be worked around):
+Hermes has full read/search/shell/test access to the live project, but
+code changes never land in the live tree automatically. Every proposed
+change goes to `.hermes_scratch/`, mirroring the live path (e.g. a
+change to `scripts/Dragon.gd` becomes
+`.hermes_scratch/scripts/Dragon.gd`) — a human reviews and applies it.
+This is Phase 1 of a deliberate rollout (Phase 2: an isolated git
+worktree/branch Hermes can freely edit, reviewed as a diff before
+merge; Phase 3: narrowly-scoped direct edits; Phase 4: broader
+autonomy, if the evidence from the earlier phases justifies it — none
+of Phases 2–4 exist yet).
+
+Enforcement is real, not a prompt asking politely:
+
+1. **A safe-mode preamble is sent on EVERY turn**, not once at session
+   start — see `build_safe_mode_preamble()` — so the rule can't fade out
+   of a long conversation's effective context.
+2. **A real SHA-256 content fingerprint of the entire live tree**
+   (excluding `.hermes_scratch/` and `.git/`) is captured before and
+   after every turn, and any path whose hash differs — or that was
+   created or deleted — is surfaced to the dock as a hard, unmissable
+   violation. See `_capture_tree_fingerprint()` /
+   `diff_tree_fingerprints()` in `hermes_bridge.gd`.
+
+**Correction (review, after the first implementation)**: the original
+mechanism compared `git status --porcelain` *lines* before/after a
+turn, flagging only newly-appearing lines. This had a real, proven
+blind spot: a file that was already dirty (`M file.gd`) or already
+untracked (`?? notes.txt`) *before* the turn produces the *identical*
+status line after the turn even if its actual content changed — `git
+status` classifies dirty/clean, not "did this turn touch it." Proven
+with two real, executed regressions (an already-dirty tracked file and
+an already-untracked file, both silently overwritable) before the fix
+was written — not reasoned about, demonstrated. Real per-file content
+hashing is now the authority; `git status` output is retained only as
+an optional, non-authoritative human-display helper
+(`diff_live_tree_changes()`).
+
+This does **not** structurally prevent a write the way OS-level
+sandboxing would — Hermes keeps real shell access, and a determined
+agent could still write outside the scratch dir. What it does do: make
+every turn self-check against real file content and make a violation
+impossible to miss.
+
+`.hermes_scratch/` and its `.gitignore` entry are set up **once, at
+plugin activation** (`hermes_dock.gd`'s `_ready()`), not on every turn —
+the bridge itself does not quietly mutate the live repository as a side
+effect of every message sent, since that would be an unstated exception
+to this whole mode's own "proposals only" contract.
 
 ## Known limitations
 

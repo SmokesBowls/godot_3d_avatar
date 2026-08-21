@@ -31,6 +31,10 @@ func _init() -> void:
 	_check_strip_session_line()
 	_check_build_wrapper_script()
 	_check_end_to_end_adversarial_via_fake_hermes()
+	_check_safe_mode_preamble()
+	_check_diff_live_tree_changes_display_helper()
+	_check_fingerprint_safety_regressions()
+	_check_end_to_end_fingerprint_audit_against_a_real_repo()
 
 	if _failures == 0:
 		print("ALL CHECKS PASSED")
@@ -167,3 +171,193 @@ func _check_end_to_end_adversarial_via_fake_hermes() -> void:
 
 	var stripped: String = HermesBridgeScript.strip_session_line(combined)
 	_assert(not stripped.contains("session_id:"), "strip_session_line removes the session_id line from what would be shown in the dock")
+
+
+# --- SAFE/REVIEW mode: preamble, scratch setup, git-diff enforcement ---
+#
+# Appended after the injection-safety work (review request: keep the
+# original workflow's write authority gated; make the mode explicit and
+# self-checking, not just "Hermes was told"). These checks exercise the
+# real logic against a REAL, throwaway git repo — not a mock — since the
+# whole point of the enforcement mechanism is trusting real `git status`.
+
+
+func _check_safe_mode_preamble() -> void:
+	print("== build_safe_mode_preamble ==")
+	var preamble: String = HermesBridgeScript.build_safe_mode_preamble("/my/project")
+	_assert(preamble.contains("SAFE/REVIEW MODE"), "names the mode explicitly")
+	_assert(preamble.contains("/my/project"), "states the real working directory")
+	_assert(preamble.contains("./.hermes_scratch/"), "names the scratch dir by its real relative path")
+	_assert(preamble.contains("do NOT create, modify, move, rename, or delete"), "states the live-tree prohibition explicitly")
+	_assert(preamble.ends_with("---\n\n"), "ends with a clear separator before the actual message gets appended")
+
+
+## DISPLAY-ONLY HELPER — NOT the safety authority. See
+## diff_tree_fingerprints() below for the real gate, and this function's
+## own doc comment in hermes_bridge.gd for the proven blind spot that
+## demoted diff_live_tree_changes() to "optional human reporting" only:
+## a git-status LINE stays identical when an already-dirty or already-
+## untracked file's CONTENT changes again, so a line-set diff alone
+## cannot be trusted to detect every real change.
+func _check_diff_live_tree_changes_display_helper() -> void:
+	print("== diff_live_tree_changes (display-only helper, not the safety gate) ==")
+	var before: PackedStringArray = [" M scripts/existing.gd"]
+	var after_clean: PackedStringArray = [" M scripts/existing.gd", "?? .hermes_scratch/scripts/proposed.gd"]
+	_assert(
+		HermesBridgeScript.diff_live_tree_changes(before, after_clean).is_empty(),
+		"a new file inside .hermes_scratch/ is NOT flagged by this helper"
+	)
+	var after_violation: PackedStringArray = [" M scripts/existing.gd", " M scripts/live_file_hermes_touched.gd"]
+	var violations: PackedStringArray = HermesBridgeScript.diff_live_tree_changes(before, after_violation)
+	_assert(
+		violations.size() == 1 and violations[0].contains("live_file_hermes_touched.gd"),
+		"a NEW status line for a live-tree path is still flagged by this helper: got %s" % [violations]
+	)
+
+
+## Real throwaway git repo, real filesystem writes, real SHA-256 via
+## FileAccess.get_sha256() — the 8 regressions required after the
+## review correction. Each one is a genuinely executed scenario, not a
+## hand-constructed dictionary, so this proves the fingerprint mechanism
+## against real file I/O, not just its own data shape.
+func _check_fingerprint_safety_regressions() -> void:
+	print("== diff_tree_fingerprints: the 8 required regressions, real repo + real files ==")
+
+	var repo_dir := OS.get_temp_dir().path_join("hermes_editor_TEST_fp_%d" % randi())
+	DirAccess.make_dir_recursive_absolute(repo_dir)
+	var git_out: Array = []
+	OS.execute("/usr/bin/git", ["-C", repo_dir, "init", "-q"], git_out, true)
+	OS.execute("/usr/bin/git", ["-C", repo_dir, "config", "user.email", "t@e.com"], git_out, true)
+	OS.execute("/usr/bin/git", ["-C", repo_dir, "config", "user.name", "T"], git_out, true)
+
+	# --- Setup: one clean tracked file, one PRE-DIRTIED tracked file
+	# (the exact blind spot), one PRE-EXISTING untracked file, plus the
+	# to-be-created/deleted/renamed fixtures. ---
+	_write(repo_dir, "clean_tracked.gd", "clean original\n")
+	_write(repo_dir, "already_dirty_tracked.gd", "committed version\n")
+	_write(repo_dir, "to_be_deleted.gd", "will be deleted\n")
+	_write(repo_dir, "to_be_renamed_from.gd", "will be renamed\n")
+	OS.execute("/usr/bin/git", ["-C", repo_dir, "add", "."], git_out, true)
+	OS.execute("/usr/bin/git", ["-C", repo_dir, "commit", "-q", "-m", "init"], git_out, true)
+	# Now dirty already_dirty_tracked.gd BEFORE the "turn" begins.
+	_write(repo_dir, "already_dirty_tracked.gd", "dirty before turn even starts\n")
+	# And an untracked file that already exists before the turn.
+	_write(repo_dir, "already_existing_untracked.gd", "untracked original\n")
+
+	HermesBridgeScript._ensure_scratch_setup(repo_dir)
+
+	var before: Dictionary = HermesBridgeScript._capture_tree_fingerprint(repo_dir)
+
+	# 1. clean tracked file changed -> violation
+	_write(repo_dir, "clean_tracked.gd", "changed during the turn\n")
+	# 2. already-modified tracked file changed AGAIN -> violation (the actual blind spot)
+	_write(repo_dir, "already_dirty_tracked.gd", "changed AGAIN during the turn\n")
+	# 3. existing untracked file changed -> violation
+	_write(repo_dir, "already_existing_untracked.gd", "changed during the turn\n")
+	# 4. file created -> violation
+	_write(repo_dir, "brand_new_file.gd", "new during the turn\n")
+	# 5. file deleted -> violation
+	DirAccess.remove_absolute(repo_dir.path_join("to_be_deleted.gd"))
+	# 6. file renamed -> violation (shows as a delete+create pair)
+	var rename_content := FileAccess.get_file_as_string(repo_dir.path_join("to_be_renamed_from.gd"))
+	DirAccess.remove_absolute(repo_dir.path_join("to_be_renamed_from.gd"))
+	_write(repo_dir, "to_be_renamed_to.gd", rename_content)
+	# 7. scratch file created/changed -> NOT a violation
+	_write(repo_dir, ".hermes_scratch/some_proposal.gd", "a real proposal\n")
+
+	var after: Dictionary = HermesBridgeScript._capture_tree_fingerprint(repo_dir)
+	var violations: PackedStringArray = HermesBridgeScript.diff_tree_fingerprints(before, after)
+	print("  violations: ", violations)
+
+	_assert(_contains_match(violations, "clean_tracked.gd"), "1. clean tracked file changed -> violation")
+	_assert(_contains_match(violations, "already_dirty_tracked.gd"), "2. ALREADY-dirty tracked file changed AGAIN -> violation (the proven blind spot)")
+	_assert(_contains_match(violations, "already_existing_untracked.gd"), "3. existing untracked file changed -> violation (the proven blind spot)")
+	_assert(_contains_match(violations, "brand_new_file.gd") and violations[_find_match(violations, "brand_new_file.gd")].begins_with("created:"), "4. file created -> violation")
+	_assert(_contains_match(violations, "to_be_deleted.gd") and violations[_find_match(violations, "to_be_deleted.gd")].begins_with("deleted:"), "5. file deleted -> violation")
+	_assert(_contains_match(violations, "to_be_renamed_from.gd"), "6a. rename: old path reported as deleted")
+	_assert(_contains_match(violations, "to_be_renamed_to.gd"), "6b. rename: new path reported as created")
+	_assert(not _contains_match(violations, "some_proposal.gd"), "7. scratch file created/changed -> NOT a violation")
+
+	# 8. no filesystem change -> no violation (separate clean before/after pair)
+	var clean_before: Dictionary = HermesBridgeScript._capture_tree_fingerprint(repo_dir)
+	var clean_after: Dictionary = HermesBridgeScript._capture_tree_fingerprint(repo_dir)
+	_assert(HermesBridgeScript.diff_tree_fingerprints(clean_before, clean_after).is_empty(), "8. no filesystem change -> no violation")
+
+	# 7b. scratch file DELETED -> also not a violation (completes "created/changed/deleted" from the instruction)
+	var before_delete: Dictionary = HermesBridgeScript._capture_tree_fingerprint(repo_dir)
+	DirAccess.remove_absolute(repo_dir.path_join(".hermes_scratch/some_proposal.gd"))
+	var after_delete: Dictionary = HermesBridgeScript._capture_tree_fingerprint(repo_dir)
+	_assert(
+		HermesBridgeScript.diff_tree_fingerprints(before_delete, after_delete).is_empty(),
+		"7b. scratch file deleted -> NOT a violation"
+	)
+
+	var cleanup: Array = []
+	OS.execute("/bin/rm", ["-rf", repo_dir], cleanup, true)
+	_assert(not DirAccess.dir_exists_absolute(repo_dir), "throwaway test repo fully cleaned up from the OS temp dir")
+
+
+static func _write(root: String, rel_path: String, content: String) -> void:
+	var full := root.path_join(rel_path)
+	var parent := full.get_base_dir()
+	if not DirAccess.dir_exists_absolute(parent):
+		DirAccess.make_dir_recursive_absolute(parent)
+	var f := FileAccess.open(full, FileAccess.WRITE)
+	f.store_string(content)
+	f.close()
+
+
+static func _contains_match(violations: PackedStringArray, needle: String) -> bool:
+	return _find_match(violations, needle) != -1
+
+
+static func _find_match(violations: PackedStringArray, needle: String) -> int:
+	for i in range(violations.size()):
+		if String(violations[i]).contains(needle):
+			return i
+	return -1
+
+
+## The end-to-end integration proof for the FINGERPRINT mechanism
+## specifically (the earlier real-git-repo test above now exercises the
+## display-only helper only) — proves _ensure_scratch_setup(),
+## _capture_tree_fingerprint(), and diff_tree_fingerprints() all work
+## together correctly, not just each piece in isolation.
+func _check_end_to_end_fingerprint_audit_against_a_real_repo() -> void:
+	print("== end-to-end: real repo, real fingerprint capture, real violation detection ==")
+
+	var repo_dir := OS.get_temp_dir().path_join("hermes_editor_TEST_e2e_%d" % randi())
+	DirAccess.make_dir_recursive_absolute(repo_dir)
+	_write(repo_dir, "tracked.gd", "# original content\n")
+	var git_out: Array = []
+	OS.execute("/usr/bin/git", ["-C", repo_dir, "init", "-q"], git_out, true)
+	OS.execute("/usr/bin/git", ["-C", repo_dir, "add", "."], git_out, true)
+	OS.execute("/usr/bin/git", ["-C", repo_dir, "-c", "user.email=t@e.com", "-c", "user.name=T", "commit", "-q", "-m", "init"], git_out, true)
+
+	HermesBridgeScript._ensure_scratch_setup(repo_dir)
+	_assert(DirAccess.dir_exists_absolute(repo_dir.path_join(".hermes_scratch")), "scratch dir created by install-time setup")
+	var gitignore := FileAccess.open(repo_dir.path_join(".gitignore"), FileAccess.READ)
+	_assert(gitignore != null and gitignore.get_as_text().contains(".hermes_scratch"), "scratch dir added to .gitignore by install-time setup")
+	if gitignore != null:
+		gitignore.close()
+
+	var before: Dictionary = HermesBridgeScript._capture_tree_fingerprint(repo_dir)
+
+	# Compliant turn: proposal written only to scratch.
+	_write(repo_dir, ".hermes_scratch/tracked.gd", "# proposed content\n")
+	var after_compliant: Dictionary = HermesBridgeScript._capture_tree_fingerprint(repo_dir)
+	var compliant_violations: PackedStringArray = HermesBridgeScript.diff_tree_fingerprints(before, after_compliant)
+	_assert(compliant_violations.is_empty(), "a real compliant turn (scratch-only write) produces zero violations: got %s" % [compliant_violations])
+
+	# Violating turn: the live tracked file is edited directly.
+	_write(repo_dir, "tracked.gd", "# Hermes overwrote this directly!\n")
+	var after_violation: Dictionary = HermesBridgeScript._capture_tree_fingerprint(repo_dir)
+	var real_violations: PackedStringArray = HermesBridgeScript.diff_tree_fingerprints(after_compliant, after_violation)
+	_assert(
+		real_violations.size() == 1 and real_violations[0].contains("tracked.gd") and real_violations[0].begins_with("modified:"),
+		"a real direct edit to the live tracked file IS caught: got %s" % [real_violations]
+	)
+
+	var cleanup: Array = []
+	OS.execute("/bin/rm", ["-rf", repo_dir], cleanup, true)
+	_assert(not DirAccess.dir_exists_absolute(repo_dir), "throwaway test repo fully cleaned up from the OS temp dir")
