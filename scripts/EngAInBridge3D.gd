@@ -65,6 +65,7 @@ const CURRENT_VIEW_PHRASES: Array[String] = [
 	"what do you see", "what can you see", "what is visible", "currently visible",
 	"current viewport", "current view", "current screen", "current frame", "current scene",
 	"current room", "right now", "in front of me", "left side of the screen",
+	"describe the scene",
 	"right side of the screen", "left side of the frame", "right side of the frame",
 	"look at this", "look here", "look around",
 ]

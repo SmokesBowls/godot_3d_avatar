@@ -22,6 +22,7 @@ ROUTING_CASES = {
     "What did you see in the previous scene?": "text_only",
     "Explain this plan.": "text_only",
     "Do you remember this Dragon on the screen?": "current_perception",
+    "ok, once more verification. describe the scene": "current_perception",
 }
 
 
