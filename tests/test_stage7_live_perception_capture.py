@@ -236,7 +236,7 @@ def test_request_timestamp_follows_capture_and_full_perception_is_forwarded_dire
     assert '"perception_state": "unavailable"' not in builder
 
 
-def test_valid_unavailable_result_publishes_once_and_invalid_result_aborts() -> None:
+def test_invalid_or_unavailable_capture_aborts_before_publication() -> None:
     body = _function(_source(BRIDGE_SOURCE), "submit")
     assert 'status not in ["full", "unavailable"]' in body
     assert 'capture_result["perception"]' in body

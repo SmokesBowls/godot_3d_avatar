@@ -45,43 +45,10 @@ const CONTEXT_SCHEMA: Array[String] = [
 	"companion_ref",
 	"perception",
 ]
-const TEXT_ONLY_CONTEXT_SCHEMA: Array[String] = [
-	"client_request_id",
-	"companion_ref",
-	"routing_mode",
-]
-const ROUTE_TEXT_ONLY := "text_only"
 const ROUTE_CURRENT_PERCEPTION := "current_perception"
 const STATUS_IDLE := "IDLE"
 const STATUS_LOOKING_INTERNAL := "LOOKING_INTERNAL"
 const STATUS_THINKING := "THINKING"
-const NO_CURRENT_IMAGE_PHRASES: Array[String] = [
-	"without using any current image", "without a current image",
-	"do not use any current image", "do not use a current image",
-	"don't use any current image", "don't use a current image",
-	"no current image", "text only",
-]
-const CURRENT_VIEW_PHRASES: Array[String] = [
-	"what do you see", "what can you see", "what is visible", "currently visible",
-	"current viewport", "current view", "current screen", "current frame", "current scene",
-	"current room", "right now", "in front of me", "left side of the screen",
-	"describe the scene",
-	"right side of the screen", "left side of the frame", "right side of the frame",
-	"look at this", "look here", "look around",
-]
-const HISTORY_SCOPES: Array[String] = [
-	"in your memory", "from memory", "in the previous scene", "in the prior scene",
-	"in the earlier scene", "last time", "previously",
-]
-const ROUTING_ANCHORS: Array[String] = [
-	"this", "these", "here", "currently", "right now", "at the moment",
-	"in front of me", "on the screen", "in the frame", "in the viewport",
-]
-const VISUAL_SPATIAL_TERMS: Array[String] = [
-	"see", "look", "visible", "view", "screen", "frame", "viewport", "scene", "room",
-	"object", "dragon", "color", "colour", "where", "location", "left", "right", "front",
-	"behind", "above", "below", "near", "far", "different", "compare",
-]
 const RESPONSE_SCHEMA: Array[String] = [
 	"call_id",
 	"request_id",
@@ -184,7 +151,6 @@ var _active_request_id: String = ""
 var _active_call_id: String = ""
 var _active_client_request_id: String = ""
 var _active_capture_id: String = ""
-var _active_route: String = ""
 var _active_started_msec: int = 0
 var _poll_accumulator_sec: float = 0.0
 var _submission_counter: int = 0
@@ -241,67 +207,55 @@ func submit(text: String) -> void:
 		return
 	_lifecycle_generation += 1
 	var lifecycle_generation := _lifecycle_generation
-	var route := _classify_route(msg)
 	_busy = true
 	_active_client_request_id = client_request_id
-	_active_route = route
 	_active_started_msec = Time.get_ticks_msec()
-	var capture_id := ""
-	var perception: Dictionary = {}
-	var capture_status := ""
-	if route == "text_only":
-		pass
-	else:
-		_capture_pending = true
-		_set_lifecycle_status("LOOKING_INTERNAL")
-		var capture_result: Variant = await _capture_producer.capture_for_submission(client_request_id)
-		if lifecycle_generation != _lifecycle_generation:
-			return
-		if not _busy or _active_client_request_id != client_request_id:
-			return
-		if typeof(capture_result) != TYPE_DICTIONARY:
-			_end_active_lifecycle()
-			_emit_err("Live capture returned a non-object result.")
-			return
-		capture_status = capture_result.get("status")
-		if capture_status not in ["full", "unavailable"]:
-			_end_active_lifecycle()
-			_emit_err("Live capture returned an invalid status.")
-			return
-		if not _validate_live_capture_result(capture_result as Dictionary, client_request_id):
-			_end_active_lifecycle()
-			_emit_err("Live capture failed its frozen result contract.")
-			return
-		capture_id = capture_result["capture_id"]
-		perception = capture_result["perception"]
+	_capture_pending = true
+	_set_lifecycle_status("LOOKING_INTERNAL")
+	var capture_result: Variant = await _capture_producer.capture_for_submission(client_request_id)
+	if lifecycle_generation != _lifecycle_generation:
+		return
+	if not _busy or _active_client_request_id != client_request_id:
+		return
+	if typeof(capture_result) != TYPE_DICTIONARY:
+		_end_active_lifecycle()
+		_emit_err("Live capture returned a non-object result.")
+		return
+	var capture_status: Variant = capture_result.get("status")
+	if capture_status not in ["full", "unavailable"]:
+		_end_active_lifecycle()
+		_emit_err("Live capture returned an invalid status.")
+		return
+	if not _validate_live_capture_result(capture_result as Dictionary, client_request_id):
+		_end_active_lifecycle()
+		_emit_err("Live capture failed its frozen result contract.")
+		return
+	if capture_status != "full":
+		_end_active_lifecycle()
+		_emit_err("Live viewport capture is unavailable; Runtime Dragon was not invoked.")
+		return
+	var capture_id: String = capture_result["capture_id"]
+	var perception: Dictionary = capture_result["perception"]
 	var request_id := "req_" + _random_hex_16()
 	if not _matches_pattern(request_id, "^req_[0-9a-f]{32}$"):
 		_end_active_lifecycle()
 		_emit_err("Mailbox request identity allocation failed.")
 		return
 	var timestamp := Time.get_unix_time_from_system()
-	if capture_status == "full":
-		var capture_age := timestamp - float(perception["captured_at"])
-		if capture_age < 0.0 or capture_age > 5.0:
-			_end_active_lifecycle()
-			_emit_err("Live capture became stale before mailbox publication.")
-			return
-	var payload := _build_text_only_mailbox_request(msg, request_id, client_request_id, timestamp)
-	if route == ROUTE_CURRENT_PERCEPTION:
-		payload = _build_mailbox_request(msg, request_id, client_request_id, perception, timestamp)
+	var capture_age := timestamp - float(perception["captured_at"])
+	if capture_age < 0.0 or capture_age > 5.0:
+		_end_active_lifecycle()
+		_emit_err("Live capture became stale before mailbox publication.")
+		return
+	var payload := _build_mailbox_request(msg, request_id, client_request_id, perception, timestamp)
 	if not _has_exact_keys(payload, REQUEST_SCHEMA):
 		_end_active_lifecycle()
 		_emit_err("Generated request failed frozen request schema.")
 		return
 	var context: Variant = payload.get("additional_context")
-	var context_schema := TEXT_ONLY_CONTEXT_SCHEMA if route == ROUTE_TEXT_ONLY else CONTEXT_SCHEMA
-	if typeof(context) != TYPE_DICTIONARY or not _has_exact_keys(context, context_schema):
+	if typeof(context) != TYPE_DICTIONARY or not _has_exact_keys(context, CONTEXT_SCHEMA):
 		_end_active_lifecycle()
 		_emit_err("Generated request context failed frozen schema.")
-		return
-	if route == ROUTE_TEXT_ONLY and context.get("routing_mode") != "text_only":
-		_end_active_lifecycle()
-		_emit_err("Generated text-only request failed its frozen routing mode.")
 		return
 
 	var temporary_path := PROJECT_ROOT + "/.engain_request.%s.tmp" % request_id
@@ -358,47 +312,8 @@ func _build_mailbox_request(
 	}
 
 
-func _classify_route(text: String) -> String:
-	for phrase in NO_CURRENT_IMAGE_PHRASES:
-		if text.containsn(phrase):
-			return ROUTE_TEXT_ONLY
-	for scope in HISTORY_SCOPES:
-		if text.containsn(scope):
-			return ROUTE_TEXT_ONLY
-	for phrase in CURRENT_VIEW_PHRASES:
-		if text.containsn(phrase):
-			return ROUTE_CURRENT_PERCEPTION
-	var has_current_anchor := false
-	for anchor in ROUTING_ANCHORS:
-		if text.containsn(anchor):
-			has_current_anchor = true
-			break
-	if has_current_anchor:
-		for term in VISUAL_SPATIAL_TERMS:
-			if text.containsn(term):
-				return ROUTE_CURRENT_PERCEPTION
-	return ROUTE_TEXT_ONLY
-
-
-func _build_text_only_mailbox_request(
-	msg: String,
-	request_id: String,
-	client_request_id: String,
-	timestamp: float
-) -> Dictionary:
-	return {
-		"call_id": request_id,
-		"expires_at": timestamp + CALL_LIFETIME_SEC,
-		"player_input": msg,
-		"game_state": {},
-		"additional_context": {
-			"client_request_id": client_request_id,
-			"companion_ref": "hermes_b",
-			"routing_mode": "text_only",
-		},
-		"timestamp": timestamp,
-		"request_id": request_id,
-	}
+func _classify_route(_text: String) -> String:
+	return ROUTE_CURRENT_PERCEPTION
 
 
 func _validate_live_capture_result(value: Dictionary, client_request_id: String) -> bool:
@@ -754,7 +669,6 @@ func _end_active_lifecycle() -> void:
 	_active_call_id = ""
 	_active_client_request_id = ""
 	_active_capture_id = ""
-	_active_route = ""
 	_active_started_msec = 0
 	_set_lifecycle_status("IDLE") # Clear LOOKING_INTERNAL or THINKING.
 	if was_speaking:
