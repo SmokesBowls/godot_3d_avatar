@@ -249,6 +249,17 @@ def test_valid_unavailable_result_publishes_once_and_invalid_result_aborts() -> 
     assert "return" in invalid_branch
 
 
+def test_unavailable_capture_aborts_before_runtime_dragon_invocation() -> None:
+    body = _function(_source(BRIDGE_SOURCE), "submit")
+    unavailable = body.find('if capture_status != "full":')
+    publication = body.find('PackedStringArray(["--publish-request", temporary_path])')
+    assert 0 <= unavailable < publication
+    unavailable_branch = body[unavailable:publication]
+    assert "_end_active_lifecycle()" in unavailable_branch
+    assert "_emit_err" in unavailable_branch
+    assert "return" in unavailable_branch
+
+
 def test_publication_failure_releases_lifecycle_without_adapter_processing() -> None:
     body = _function(_source(BRIDGE_SOURCE), "submit")
     failure_start = body.find('publication["code"] != 0')

@@ -150,6 +150,23 @@ def test_ticket3b_current_perception_fixture_preserves_one_stage7_capture() -> N
     assert '"capture_id": capture_id' not in builder
 
 
+def test_every_runtime_inquiry_requires_current_perception_before_publication(
+    tmp_path: Path,
+) -> None:
+    """Runtime Dragon must see one fresh viewport before answering any inquiry."""
+    result = _run_routing_matrix(tmp_path)
+    routes = result["routes"]
+    assert isinstance(routes, dict)
+    assert set(routes.values()) == {"current_perception"}
+
+    body = _function(SOURCE, "submit")
+    capture = body.find("capture_for_submission(client_request_id)")
+    publication = body.find('PackedStringArray(["--publish-request", temporary_path])')
+    assert 0 <= capture < publication
+    assert 'if route == "text_only":' not in body[:capture]
+    assert "_build_text_only_mailbox_request" not in body
+
+
 def test_ticket3b_routing_probe_has_no_provider_execution_surface() -> None:
     forbidden = ("--resume", "--image", "HermesCLIClient", "_run_bounded", "hermes chat")
     assert [token for token in forbidden if token in SOURCE] == []
