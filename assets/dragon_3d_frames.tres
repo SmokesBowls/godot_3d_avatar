@@ -1,4 +1,4 @@
-[gd_resource type="SpriteFrames" load_steps=14 format=3 uid="uid://ddy6rrveeb13w"]
+[gd_resource type="SpriteFrames" format=3 uid="uid://ddy6rrveeb13w"]
 
 [ext_resource type="Texture2D" uid="uid://boa8aep4up108" path="res://assets/idle_flap.png" id="1_sj41s"]
 

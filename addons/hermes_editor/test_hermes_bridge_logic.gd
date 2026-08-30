@@ -32,6 +32,7 @@ func _init() -> void:
 	_check_build_wrapper_script()
 	_check_end_to_end_adversarial_via_fake_hermes()
 	_check_safe_mode_preamble()
+	_check_temporary_direct_write_mode()
 	_check_diff_live_tree_changes_display_helper()
 	_check_fingerprint_safety_regressions()
 	_check_end_to_end_fingerprint_audit_against_a_real_repo()
@@ -190,6 +191,39 @@ func _check_safe_mode_preamble() -> void:
 	_assert(preamble.contains("./.hermes_scratch/"), "names the scratch dir by its real relative path")
 	_assert(preamble.contains("do NOT create, modify, move, rename, or delete"), "states the live-tree prohibition explicitly")
 	_assert(preamble.ends_with("---\n\n"), "ends with a clear separator before the actual message gets appended")
+
+
+func _check_temporary_direct_write_mode() -> void:
+	print("== temporary direct-write mode ==")
+	_assert(
+		HermesBridgeScript.MODE_DIRECT_WRITE == "DIRECT_WRITE",
+		"direct-write mode has a stable explicit identity"
+	)
+	var direct: String = HermesBridgeScript.build_mode_message(
+		HermesBridgeScript.MODE_DIRECT_WRITE,
+		"/my/project",
+		"move the witness"
+	)
+	_assert(direct.contains("TEMPORARY DIRECT WRITE MODE"), "direct turns explicitly supersede prior SAFE/REVIEW instructions")
+	_assert(direct.contains("/my/project"), "direct turns state the exact live project root")
+	_assert(direct.contains("modify the LIVE project directly"), "direct turns grant live mutation")
+	_assert(not direct.contains("do NOT create, modify, move, rename, or delete"), "direct turns do not retain the live-tree prohibition")
+	_assert(direct.ends_with("move the witness"), "natural request follows the direct-write preamble unchanged")
+
+	var safe: String = HermesBridgeScript.build_mode_message(
+		HermesBridgeScript.MODE_SAFE_REVIEW,
+		"/my/project",
+		"inspect the witness"
+	)
+	_assert(safe.contains("SAFE/REVIEW MODE"), "safe mode retains its existing per-turn prohibition")
+	_assert(safe.ends_with("inspect the witness"), "natural request follows the safe preamble unchanged")
+
+	var unknown: String = HermesBridgeScript.build_mode_message(
+		"UNKNOWN",
+		"/my/project",
+		"attempt mutation"
+	)
+	_assert(unknown.contains("SAFE/REVIEW MODE"), "unknown mode fails closed to SAFE/REVIEW")
 
 
 ## DISPLAY-ONLY HELPER — NOT the safety authority. See

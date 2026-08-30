@@ -1,30 +1,117 @@
-[gd_scene load_steps=5 format=3]
+[gd_scene format=3 uid="uid://dx1dip5pnqmuw"]
 
-[ext_resource type="PackedScene" path="res://scenes/DragonAvatar3D.tscn" id="1_dragon"]
-[ext_resource type="PackedScene" path="res://scenes/ControlHUD.tscn" id="2_hud"]
-[ext_resource type="Script" path="res://scripts/Main.gd" id="3_main"]
+[ext_resource type="PackedScene" uid="uid://dyw2rrveeb13w" path="res://scenes/DragonAvatar3D.tscn" id="1_dragon"]
+[ext_resource type="PackedScene" uid="uid://b1ytp8j8x7g6k" path="res://scenes/ControlHUD.tscn" id="2_hud"]
+[ext_resource type="Script" uid="uid://cf2n754qegumo" path="res://scripts/Main.gd" id="3_main"]
 
 [sub_resource type="PlaneMesh" id="PlaneMesh_ground"]
 size = Vector2(20, 20)
 
-[node name="Main" type="Node3D"]
+[node name="Main" type="Node3D" unique_id=416099394]
 script = ExtResource("3_main")
 
-[node name="World" type="Node3D" parent="."]
+[node name="World" type="Node3D" parent="." unique_id=364165448]
 
-[node name="DirectionalLight3D" type="DirectionalLight3D" parent="World"]
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="World" unique_id=24544285]
 transform = Transform3D(-0.866025, -0.433013, 0.25, 0, 0.5, 0.866025, -0.5, 0.75, -0.433013, 0, 5, 0)
 shadow_enabled = true
 
-[node name="Camera3D" type="Camera3D" parent="World"]
+[node name="Camera3D" type="Camera3D" parent="World" unique_id=13922401]
 transform = Transform3D(1, 0, 0, 0, 0.965926, 0.258819, 0, -0.258819, 0.965926, 0, 2, 5)
 
-[node name="Ground" type="MeshInstance3D" parent="World"]
+[node name="Ground" type="MeshInstance3D" parent="World" unique_id=1141669914]
 mesh = SubResource("PlaneMesh_ground")
 
-[node name="DragonAvatar3D" parent="World" instance=ExtResource("1_dragon")]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.5, 0)
+[node name="DragonAvatar3D" parent="World" unique_id=1183454696 instance=ExtResource("1_dragon")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.693476, 1.2950282, -1.3300718)
 
-[node name="UI" type="CanvasLayer" parent="."]
+[node name="UI" type="CanvasLayer" parent="." unique_id=636635132]
 
-[node name="ControlHUD" parent="UI" instance=ExtResource("2_hud")]
+[node name="ControlHUD" parent="UI" unique_id=1768076726 instance=ExtResource("2_hud")]
+
+[node name="Label" type="Label" parent="UI" unique_id=1468920849]
+anchors_preset = 2
+anchor_top = 1.0
+anchor_bottom = 1.0
+offset_left = 22.0
+offset_top = -108.0
+offset_right = 148.0
+offset_bottom = -36.0
+grow_horizontal = 1
+grow_vertical = 0
+text = "VIOLET-7319"
+
+[node name="BeaconGate" type="Control" parent="UI"]
+layout_mode = 3
+anchors_preset = 2
+anchor_top = 1.0
+anchor_bottom = 1.0
+offset_left = 6.0
+offset_top = -125.0
+offset_right = 164.0
+offset_bottom = -20.0
+grow_horizontal = 1
+grow_vertical = 0
+mouse_filter = 2
+
+[node name="TopBeam" type="ColorRect" parent="UI/BeaconGate"]
+layout_mode = 0
+offset_right = 158.0
+offset_bottom = 4.0
+mouse_filter = 2
+color = Color(0.117647, 0.352941, 1, 0.82)
+
+[node name="BottomBeam" type="ColorRect" parent="UI/BeaconGate"]
+layout_mode = 0
+offset_top = 101.0
+offset_right = 158.0
+offset_bottom = 105.0
+mouse_filter = 2
+color = Color(0.117647, 0.352941, 1, 0.82)
+
+[node name="LeftPillar" type="ColorRect" parent="UI/BeaconGate"]
+layout_mode = 0
+offset_right = 4.0
+offset_bottom = 105.0
+mouse_filter = 2
+color = Color(0.117647, 0.352941, 1, 0.82)
+
+[node name="RightPillar" type="ColorRect" parent="UI/BeaconGate"]
+layout_mode = 0
+offset_left = 154.0
+offset_right = 158.0
+offset_bottom = 105.0
+mouse_filter = 2
+color = Color(0.117647, 0.352941, 1, 0.82)
+
+[node name="TopLeftBeacon" type="ColorRect" parent="UI/BeaconGate"]
+layout_mode = 0
+offset_right = 12.0
+offset_bottom = 12.0
+mouse_filter = 2
+color = Color(0.266667, 0.917647, 1, 1)
+
+[node name="TopRightBeacon" type="ColorRect" parent="UI/BeaconGate"]
+layout_mode = 0
+offset_left = 146.0
+offset_right = 158.0
+offset_bottom = 12.0
+mouse_filter = 2
+color = Color(0.266667, 0.917647, 1, 1)
+
+[node name="BottomLeftBeacon" type="ColorRect" parent="UI/BeaconGate"]
+layout_mode = 0
+offset_top = 93.0
+offset_right = 12.0
+offset_bottom = 105.0
+mouse_filter = 2
+color = Color(0.266667, 0.917647, 1, 1)
+
+[node name="BottomRightBeacon" type="ColorRect" parent="UI/BeaconGate"]
+layout_mode = 0
+offset_left = 146.0
+offset_top = 93.0
+offset_right = 158.0
+offset_bottom = 105.0
+mouse_filter = 2
+color = Color(0.266667, 0.917647, 1, 1)

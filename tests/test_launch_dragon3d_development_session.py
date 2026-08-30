@@ -13,6 +13,7 @@ import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 LAUNCHER = PROJECT_ROOT / "launch_dragon3d.sh"
+RESTART_HELPER = PROJECT_ROOT / "restart_dragon3d_runtime.sh"
 
 
 def _write_fake_process(path: Path) -> None:
@@ -202,3 +203,85 @@ def test_runtime_startup_failure_leaves_editor_available_and_is_final_exit_statu
         assert process.wait(timeout=5.0) == 23
     finally:
         _cleanup(process)
+
+
+def test_editor_session_can_restart_closed_composed_runtime_without_reopening_editor(tmp_path: Path) -> None:
+    process, event_log, editor_exit, runtime_exit = _start_launcher(tmp_path)
+    try:
+        _wait_for(lambda: _roles_started(event_log) == {"editor", "runtime"})
+        initial_editor_pid = next(
+            int(event["pid"])
+            for event in _events(event_log)
+            if event["role"] == "editor" and event["event"] == "started"
+        )
+
+        runtime_exit.touch()
+        _wait_for(
+            lambda: sum(
+                event["role"] == "runtime" and event["event"] == "natural_exit"
+                for event in _events(event_log)
+            )
+            == 1
+        )
+        runtime_exit.unlink()
+
+        helper_env = os.environ.copy()
+        helper_env.update(
+            {
+                "DRAGON3D_LAUNCHER_PID": str(process.pid),
+                "DRAGON3D_PROJECT_DIR": str(PROJECT_ROOT),
+            }
+        )
+        completed = subprocess.run(
+            [str(RESTART_HELPER)],
+            cwd=tmp_path,
+            env=helper_env,
+            text=True,
+            capture_output=True,
+            timeout=5.0,
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stdout + completed.stderr
+
+        _wait_for(
+            lambda: sum(
+                event["role"] == "runtime" and event["event"] == "started"
+                for event in _events(event_log)
+            )
+            == 2
+        )
+        editor_starts = [
+            event
+            for event in _events(event_log)
+            if event["role"] == "editor" and event["event"] == "started"
+        ]
+        assert [int(event["pid"]) for event in editor_starts] == [initial_editor_pid]
+
+        editor_exit.touch()
+        runtime_exit.touch()
+        assert process.wait(timeout=5.0) == 0
+    finally:
+        _cleanup(process)
+
+
+def test_hermes_dock_exposes_explicit_composed_runtime_restart_control() -> None:
+    dock_source = (PROJECT_ROOT / "addons/hermes_editor/hermes_dock.gd").read_text(encoding="utf-8")
+
+    assert '"Restart Composed Runtime"' in dock_source
+    assert "restart_dragon3d_runtime.sh" in dock_source
+
+
+def test_hermes_dock_exposes_reversible_temporary_direct_write_mode() -> None:
+    dock_source = (PROJECT_ROOT / "addons/hermes_editor/hermes_dock.gd").read_text(encoding="utf-8")
+
+    assert '"DIRECT WRITE — TEMPORARY LIVE TRIAL"' in dock_source
+    assert "set_item_disabled(1, true)" not in dock_source
+    assert "_mode_selector.select(1)" in dock_source
+    assert "_mode_selector.item_selected.connect(_on_mode_selected)" in dock_source
+    assert "_mode_selector.disabled = true" in dock_source
+    assert "_mode_selector.disabled = false" in dock_source
+    assert "_ensure_temporary_trial_ui" in dock_source
+    assert "in-memory Hermes session_id" in dock_source
+    assert "HermesBridgeScript.MODE_DIRECT_WRITE" in dock_source
+    assert "_bridge.send(" in dock_source
+    assert "selected_mode" in dock_source

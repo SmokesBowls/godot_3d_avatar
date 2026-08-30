@@ -5,6 +5,8 @@ const PROJECT_ID := "godot_3d_avatar"
 const SCENE_PATH := "res://scenes/Main.tscn"
 const DRAGON_SCENE_PATH := "res://scenes/DragonAvatar3D.tscn"
 const DRAGON_NODE_PATH := NodePath("World/DragonAvatar3D")
+const TRANSCRIPT_NODE_PATH := NodePath("UI/ControlHUD/Output")
+const CONVERSATION_INPUT_NODE_PATH := NodePath("UI/ControlHUD/CollaborationInput")
 const SESSION_ID := "20260731_065008_63a62d"
 
 const CAPTURE_ROOT_ABSOLUTE := "/mnt/data-drive/godot_engain_3d_avatar/snapshots"
@@ -97,6 +99,7 @@ func capture_for_submission(client_request_id: String) -> Dictionary:
 	var perception: Dictionary
 	var known_failure_codes := [
 		"DRAGON_SCENE_UNAVAILABLE",
+		"TRANSCRIPT_EXCLUSION_UNAVAILABLE",
 		"CAPTURE_ROOT_REJECTED",
 		"PNG_DIMENSION_MISMATCH",
 		"FINAL_CORRELATION_FAILED",
@@ -181,6 +184,12 @@ func _capture_persisted(
 	var dragon := current_scene.get_node_or_null(DRAGON_NODE_PATH)
 	if dragon == null or dragon.scene_file_path != DRAGON_SCENE_PATH:
 		return _capture_failure("DRAGON_SCENE_UNAVAILABLE")
+	var transcript := current_scene.get_node_or_null(TRANSCRIPT_NODE_PATH) as CanvasItem
+	if transcript == null:
+		return _capture_failure("TRANSCRIPT_EXCLUSION_UNAVAILABLE")
+	var conversation_input := current_scene.get_node_or_null(CONVERSATION_INPUT_NODE_PATH) as LineEdit
+	if conversation_input == null:
+		return _capture_failure("TRANSCRIPT_EXCLUSION_UNAVAILABLE")
 
 	var project_dir := DirAccess.open("res://")
 	if project_dir == null:
@@ -205,22 +214,15 @@ func _capture_persisted(
 	):
 		return _capture_failure("CAPTURE_ALREADY_EXISTS")
 
-	await get_tree().process_frame
-	await RenderingServer.frame_post_draw
-
-	var viewport := get_viewport()
-	if viewport == null:
-		return _capture_failure("VIEWPORT_UNAVAILABLE")
-	var viewport_size := viewport.get_visible_rect().size
-	var viewport_width := int(viewport_size.x)
-	var viewport_height := int(viewport_size.y)
-	if not _valid_dimension(viewport_width) or not _valid_dimension(viewport_height):
-		return _capture_failure("VIEWPORT_DIMENSIONS_INVALID")
-	var image := viewport.get_texture().get_image()
-	if image == null:
-		return _capture_failure("VIEWPORT_UNAVAILABLE")
-	if image.get_width() != viewport_width or image.get_height() != viewport_height:
-		return _capture_failure("VIEWPORT_DIMENSION_MISMATCH")
+	var viewport_capture: Dictionary = await _capture_viewport_without_transcript(
+		transcript,
+		conversation_input
+	)
+	if not viewport_capture.get("ok", false):
+		return _capture_failure(str(viewport_capture.get("failure_code", "VIEWPORT_UNAVAILABLE")))
+	var viewport_width: int = viewport_capture["width"]
+	var viewport_height: int = viewport_capture["height"]
+	var image: Image = viewport_capture["image"]
 
 	var save_error := image.save_png(image_absolute)
 	image = null
@@ -358,6 +360,55 @@ func _capture_persisted(
 		"metadata": persisted_metadata,
 		"image_sha256": image_sha256,
 	}
+
+
+func _capture_viewport_without_transcript(
+	transcript: CanvasItem,
+	conversation_input: LineEdit
+) -> Dictionary:
+	if (
+		transcript == null
+		or not is_instance_valid(transcript)
+		or conversation_input == null
+		or not is_instance_valid(conversation_input)
+	):
+		return _capture_failure("TRANSCRIPT_EXCLUSION_UNAVAILABLE")
+	var transcript_was_visible := transcript.visible
+	var conversation_input_text := conversation_input.text
+	transcript.hide()
+	conversation_input.clear()
+	await get_tree().process_frame
+	await RenderingServer.frame_post_draw
+
+	var result: Dictionary
+	var viewport := get_viewport()
+	if viewport == null:
+		result = _capture_failure("VIEWPORT_UNAVAILABLE")
+	else:
+		var viewport_size := viewport.get_visible_rect().size
+		var viewport_width := int(viewport_size.x)
+		var viewport_height := int(viewport_size.y)
+		if not _valid_dimension(viewport_width) or not _valid_dimension(viewport_height):
+			result = _capture_failure("VIEWPORT_DIMENSIONS_INVALID")
+		else:
+			var image := viewport.get_texture().get_image()
+			if image == null:
+				result = _capture_failure("VIEWPORT_UNAVAILABLE")
+			elif image.get_width() != viewport_width or image.get_height() != viewport_height:
+				result = _capture_failure("VIEWPORT_DIMENSION_MISMATCH")
+			else:
+				result = {
+					"ok": true,
+					"image": image,
+					"width": viewport_width,
+					"height": viewport_height,
+				}
+
+	if not is_instance_valid(transcript) or not is_instance_valid(conversation_input):
+		return _capture_failure("TRANSCRIPT_EXCLUSION_UNAVAILABLE")
+	transcript.visible = transcript_was_visible
+	conversation_input.text = conversation_input_text
+	return result
 
 
 func _full_perception(

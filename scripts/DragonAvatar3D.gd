@@ -1,7 +1,8 @@
 # DragonAvatar3D.gd
 # ------------------------------------------------------------
 # A single, flexible script that controls the dragon avatar:
-# • 3‑D orbital / bobbing motion (configurable)
+# • Horizontal back-and-forth flight with configurable endpoint pauses
+# • Subtle vertical bobbing (configurable)
 # • Optional “billboard‑like” sprite orientation
 # • Pulse‑on‑AI‑response effect (yellow flash)
 # • Works with any Node‑named bridge (EngAInBridge, EngAInBridge3D, …)
@@ -16,8 +17,9 @@ extends Node3D
 @export var bridge_path: NodePath = ^"EngAInBridge" # relative path to the AI‑bridge node
 @export var sprite_path: NodePath = ^"AnimatedSprite3D" # relative path to the sprite
 
-@export var orbit_radius: float = 1.5 # distance from the base position
-@export var orbit_speed: float = 0.6 # rad/s
+@export var horizontal_distance: float = 1.5 # distance to each side of the base position
+@export var horizontal_speed: float = 0.9 # flight speed in units per second
+@export var direction_pause: float = 3.0 # seconds to pause at each endpoint
 @export var bob_height: float = 0.25 # vertical bob amplitude
 @export var bob_speed: float = 1.2 # bob frequency (rad/s)
 
@@ -32,13 +34,16 @@ var _sprite: AnimatedSprite3D = null
 
 var _base_pos: Vector3 # static centre point (set in _ready)
 var _t: float = 0.0 # elapsed time used for animation
+var _horizontal_offset: float = 0.0
+var _flight_direction: float = 1.0
+var _pause_remaining: float = 0.0
 var _pulse_tween: Tween = null # reference to the current pulse animation
 
 # ------------------------------------------------------------
 # Node lifecycle
 # ------------------------------------------------------------
 func _ready() -> void:
-	# Cache the static centre point – we keep the avatar “orbiting” this spot.
+	# Cache the static centre point for the horizontal flight path.
 	_base_pos = global_position
 
 	# Grab the bridge and the sprite (if they exist).  Using get_node_or_null()
@@ -69,18 +74,29 @@ func _exit_tree() -> void:
 func _process(delta: float) -> void:
 	_t += delta
 
-	# 1️⃣ Orbital motion (circle on the X‑Z plane)
-	var angle: float = _t * orbit_speed
-	var x: float = cos(angle) * orbit_radius
-	var z: float = sin(angle) * orbit_radius
+	# Fly horizontally between the two endpoints. At an endpoint the dragon
+	# remains still for the configured pause before reversing direction.
+	if _pause_remaining > 0.0:
+		if delta + 0.000001 >= _pause_remaining:
+			_pause_remaining = 0.0
+			_flight_direction *= -1.0
+		else:
+			_pause_remaining -= delta
+	else:
+		_horizontal_offset += _flight_direction * horizontal_speed * delta
+		if absf(_horizontal_offset) >= horizontal_distance:
+			_horizontal_offset = clampf(_horizontal_offset, -horizontal_distance, horizontal_distance)
+			_pause_remaining = direction_pause
+			if is_zero_approx(_pause_remaining):
+				_flight_direction *= -1.0
 
-	# 2️⃣ Subtle bobbing on the Y axis
+	# Subtle bobbing on the Y axis continues while flying or paused.
 	var y: float = sin(_t * bob_speed) * bob_height
 
-	# 3️⃣ Position the avatar relative to the stored centre point.
-	global_position = _base_pos + Vector3(x, y, z)
+	# Keep Z fixed so the dragon no longer follows a circular path.
+	global_position = _base_pos + Vector3(_horizontal_offset, y, 0.0)
 
-	# 4️⃣ (Optional) Keep the sprite facing the camera – comment out if you don’t want a billboard.
+	# (Optional) Keep the sprite facing the camera – comment out if you don’t want a billboard.
 	if _sprite:
 		# In 3‑D you usually set the sprite’s rotation to look at the camera.
 		# Here we simply make sure it’s orthogonal to the global Z‑axis:
@@ -134,13 +150,14 @@ func _start_pulse() -> void:
 func set_pulse_color(col: Color) -> void:
 	pulse_intensity = col
 
-func set_orbit_parameters(radius: float = -1, speed: float = -1,
-						  bob_height: float = -1, bob_speed: float = -1) -> void:
+func set_flight_parameters(distance: float = -1, speed: float = -1,
+						   pause: float = -1, new_bob_height: float = -1,
+						   new_bob_speed: float = -1) -> void:
 	"""
-	Convenient way to tweak orbit/bob values at runtime (e.g. from the inspector
-	or another script).
+	Convenient way to tweak horizontal flight and bob values at runtime.
 	"""
-	if radius >= 0: orbit_radius = radius
-	if speed >= 0: orbit_speed = speed
-	if bob_height >= 0: bob_height = bob_height
-	if bob_speed >= 0: bob_speed = bob_speed
+	if distance >= 0: horizontal_distance = distance
+	if speed >= 0: horizontal_speed = speed
+	if pause >= 0: direction_pause = pause
+	if new_bob_height >= 0: bob_height = new_bob_height
+	if new_bob_speed >= 0: bob_speed = new_bob_speed

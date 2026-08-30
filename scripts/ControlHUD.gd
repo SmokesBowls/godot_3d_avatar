@@ -4,6 +4,7 @@ extends CanvasLayer
 @onready var input: LineEdit = $CollaborationInput
 @onready var send_btn: Button = $SendLoreButton
 @onready var lifecycle_status: Label = $LifecycleStatus
+@onready var transcript_toggle: Button = $TranscriptToggleButton
 
 # Pod layout:
 # Main
@@ -14,6 +15,7 @@ extends CanvasLayer
 var _bridge: Node = null
 
 func _ready() -> void:
+	transcript_toggle.pressed.connect(_on_transcript_toggle_pressed)
 	_bridge = get_node_or_null(bridge_path)
 	if _bridge == null:
 		_append("err", "ControlHUD: bridge not found at %s" % str(bridge_path))
@@ -40,6 +42,11 @@ func _on_input_submitted(text: String) -> void:
 
 func _on_send_pressed() -> void:
 	_bridge.call("submit", "/uplift ch22_3d_test")
+
+
+func _on_transcript_toggle_pressed() -> void:
+	output.visible = not output.visible
+	transcript_toggle.text = "HIDE CHAT" if output.visible else "SHOW CHAT"
 
 
 func _on_submission_committed(client_request_id: String, submitted_text: String) -> void:

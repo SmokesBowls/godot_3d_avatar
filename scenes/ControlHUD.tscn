@@ -29,6 +29,17 @@ text = "ControlHUD terminal initialized...
 [color=gray]Awaiting draconic connection in 3D space...[/color]
 "
 
+[node name="TranscriptToggleButton" type="Button" parent="."]
+anchors_preset = 1
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -150.0
+offset_top = 20.0
+offset_right = -20.0
+offset_bottom = 52.0
+grow_horizontal = 0
+text = "HIDE CHAT"
+
 [node name="LifecycleStatus" type="Label" parent="."]
 anchors_preset = 12
 anchor_top = 1.0

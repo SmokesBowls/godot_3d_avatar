@@ -1,4 +1,4 @@
-# Hermes Editor (Phase 1: SAFE/REVIEW — COMPLETE)
+# Hermes Editor (SAFE/REVIEW + temporary direct-write trial)
 
 A real Hermes agent seated inside the Godot editor. This is the "editor
 Dragon" — the third embodiment alongside the 2D and 3D runtime dragons —
@@ -98,30 +98,30 @@ If this bridge is ever rewritten to pass content through `OS.execute()`
 differently, re-run (or extend) `test_hermes_bridge_logic.gd`'s
 adversarial check before trusting it.
 
-## SAFE/REVIEW mode — the only mode this addon implements
+## Write modes
 
-Per deliberate design decision (not a limitation to be worked around):
-Hermes has full read/search/shell/test access to the live project, but
-code changes never land in the live tree automatically. Every proposed
-change goes to `.hermes_scratch/`, mirroring the live path (e.g. a
-change to `scripts/Dragon.gd` becomes
-`.hermes_scratch/scripts/Dragon.gd`) — a human reviews and applies it.
-This is Phase 1 of a deliberate rollout (Phase 2: an isolated git
-worktree/branch Hermes can freely edit, reviewed as a diff before
-merge; Phase 3: narrowly-scoped direct edits; Phase 4: broader
-autonomy, if the evidence from the earlier phases justifies it — none
-of Phases 2–4 exist yet).
+SAFE/REVIEW remains the durable safety boundary. Hermes has full
+read/search/shell/test access, but every proposed change goes to
+`.hermes_scratch/`, mirroring the live path for human review.
 
-Enforcement is real, not a prompt asking politely:
+`DIRECT WRITE — TEMPORARY LIVE TRIAL` is temporarily available for the
+explicitly authorized Editor Dragon maturity experiment. While selected,
+its per-turn preamble supersedes earlier scratch-only instructions in the
+resumed session and permits the requested edit to land in the live project.
+It does not authorize commit, push, unrelated cleanup, or unrelated project
+settings. The selector starts in DIRECT WRITE for this experiment; select
+SAFE/REVIEW immediately after the planned trivial edits.
 
-1. **A safe-mode preamble is sent on EVERY turn**, not once at session
-   start — see `build_safe_mode_preamble()` — so the rule can't fade out
-   of a long conversation's effective context.
+The mode boundary and audit are explicit:
+
+1. **The selected mode's preamble is sent on EVERY turn**, not once at
+   session start, so the active authority cannot fade out of a long or
+   resumed conversation.
 2. **A real SHA-256 content fingerprint of the entire live tree**
    (excluding `.hermes_scratch/` and `.git/`) is captured before and
-   after every turn, and any path whose hash differs — or that was
-   created or deleted — is surfaced to the dock as a hard, unmissable
-   violation. See `_capture_tree_fingerprint()` /
+   after every turn. Any changed, created, or deleted path is surfaced as
+   a hard violation in SAFE/REVIEW or as a neutral `DIRECT WRITE AUDIT`
+   during the temporary live trial. See `_capture_tree_fingerprint()` /
    `diff_tree_fingerprints()` in `hermes_bridge.gd`.
 
 **Correction (review, after the first implementation)**: the original
@@ -230,6 +230,21 @@ research. **GREEN**, with this cost documented rather than hidden.
   call in a background thread; there is no live token-by-token display.
 - **Closing the editor mid-turn blocks until Hermes finishes** — see
   "Process/thread teardown" above. No bounded timeout exists yet.
+
+## Runtime restart during editor work
+
+When the editor was opened by the canonical `launch_dragon3d.sh`, this dock
+shows **Restart Composed Runtime**. Save scene/resource edits, then use that
+control instead of Play/F6. It asks the outer launcher to replace only the
+composed-runtime sibling, preserving this editor process and its native Hermes
+session.
+
+The dock does not start presence authority, the mailbox worker, or the game.
+It runs `restart_dragon3d_runtime.sh` with no user-controlled arguments; that
+helper validates the inherited exact launcher PID and project root, then sends
+the restart request to that launcher. If the editor was opened bare or the
+launcher has exited, the operation fails closed and reports that the canonical
+launcher is required.
 
 ## Installation
 

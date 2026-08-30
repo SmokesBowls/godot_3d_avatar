@@ -50,31 +50,22 @@ extends Node
 ## executed test; the actual editor-embedded Hermes call is not, and
 ## must not be reported as proven until someone does that by hand.
 ##
-## SAFE/REVIEW MODE (the only mode this file implements — Phase 1 of a
-## deliberate rollout, not a permanent limitation): the live cwd-
-## reliability investigation that led here proved the bridge itself was
-## always correct and that a weak default model was the actual
-## variable — reliable tool-calling is now confirmed, which is exactly
-## why write authority over the live tree is NOT granted yet. A model
-## being reliable at running `pwd` is not evidence it's a dependable
-## autonomous editor; that has to be earned by observed work, not
-## assumed from one proof. Until then:
+## WRITE MODES: SAFE/REVIEW remains the durable default contract and
+## TEMPORARY DIRECT WRITE exists solely for the user-authorized maturity
+## experiment. The dock makes the active mode explicit and reversible.
+## SAFE/REVIEW redirects proposals to .hermes_scratch/. DIRECT WRITE
+## explicitly supersedes that instruction for the selected turn so the
+## resumed Hermes session may edit the live cwd. It does not grant commit,
+## push, unrelated cleanup, or project-wide maintenance authority.
 ##
-##   Hermes CAN: read the live project, search it, run its shell, run
-##   tests, reason about changes, generate complete code.
-##   Hermes CANNOT (yet): have that code land in the live project
-##   automatically.
-##
-## Enforcement is real, not just a prompt asking politely — per
-## instruction, "don't rely on Hermes merely being told 'don't edit'":
-##   1. A safe-mode preamble is prepended to EVERY turn's message (not
-##      sent once at session start and left to fade across a long
-##      conversation) — see build_safe_mode_preamble().
+## Enforcement/audit is real, not just a prompt asking politely:
+##   1. The selected mode's preamble is prepended to EVERY turn's message
+##      so the active authority cannot fade in a resumed conversation.
 ##   2. A CONTENT FINGERPRINT of the entire live tree (excluding
 ##      SCRATCH_DIR_NAME and .git/ internals) is captured before and
-##      after every turn — real SHA-256 per file, via path — and any
-##      path whose hash differs, or that was created/deleted, is
-##      surfaced to the dock as a hard, unmissable violation. See
+##      after every turn — real SHA-256 per file, via path. Changed paths
+##      are hard violations in SAFE/REVIEW and neutral mutation evidence
+##      in DIRECT WRITE. See
 ##      _capture_tree_fingerprint()/diff_tree_fingerprints().
 ##
 ## CORRECTION (review, after Phase 1's first draft): the original
@@ -94,25 +85,39 @@ extends Node
 ## to inspect a violation) but is no longer the authority for whether
 ## anything actually changed — a real per-file content hash is.
 ##
-## This does NOT structurally prevent a write the way OS-level
-## sandboxing would — Hermes keeps real shell access, and a determined
-## agent could still write outside the scratch dir. What it does do:
-## make every single turn self-check against real file content and
-## make a violation impossible to miss rather than something a human
-## has to remember to go check for. Graduating toward real write
-## authority (a git worktree/branch first, then narrowly-scoped direct
-## edits, per the phased rollout this implements Phase 1 of) is future,
-## deliberate work — not started here.
+## This does NOT structurally prevent writes — Hermes keeps real shell
+## access. It makes every turn self-check against real file content. In
+## SAFE/REVIEW, live-path changes are violations. In DIRECT WRITE, the
+## same changed-path list is evidence for comparing the natural request
+## with the exact mutation.
 
 signal turn_finished(result: Dictionary)
+
+const LifecycleProbe := preload("res://addons/hermes_editor/_lifecycle_probe.gd")
+const EditReceiptStore := preload("res://addons/hermes_editor/edit_receipt_store.gd")
 
 var session_id: String = ""  # empty until the first real reply names one
 var _thread: Thread
 var _discard_pending: bool = false
+var _thread_body_active: bool = false  # INSTRUMENTATION — see _run_hermes()/_run_hermes_impl() split below
+
+
+## INSTRUMENTATION — routes every bridge trace line through one place so
+## bridge_id/thread_started/thread_body_active are on EVERY line, not
+## just the ones that happened to mention them by hand. pid is added by
+## LifecycleProbe.trace() itself.
+func _bridge_trace(event: String) -> void:
+	var thread_started := _thread != null and _thread.is_started()
+	LifecycleProbe.trace(
+		"bridge_id=%d | thread_started=%s | thread_body_active=%s | %s" % [
+			get_instance_id(), str(thread_started), str(_thread_body_active), event
+		]
+	)
 
 const _SESSION_ID_LINE_PATTERN := "^session_id:\\s*(\\S+)\\s*$"
 const SCRATCH_DIR_NAME := ".hermes_scratch"
-const MODE_SAFE_REVIEW := "SAFE_REVIEW"  # the only mode implemented
+const MODE_SAFE_REVIEW := "SAFE_REVIEW"
+const MODE_DIRECT_WRITE := "DIRECT_WRITE"
 
 
 ## The real, absolute filesystem path of the currently open Godot
@@ -162,8 +167,16 @@ static func project_root() -> String:
 ## hermes/model call takes), but it is not instant either.
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_PREDELETE:
+		_bridge_trace("_notification: NOTIFICATION_PREDELETE begin")
 		if _thread != null and _thread.is_started():
+			_bridge_trace("_notification: entering _thread.wait_to_finish() — will block here if the thread body is still running")
 			_thread.wait_to_finish()
+			_bridge_trace("_notification: _thread.wait_to_finish() returned")
+		_bridge_trace("_notification: NOTIFICATION_PREDELETE end")
+	elif what == NOTIFICATION_EXIT_TREE:
+		_bridge_trace("_notification: NOTIFICATION_EXIT_TREE")
+	elif what == NOTIFICATION_UNPARENTED:
+		_bridge_trace("_notification: NOTIFICATION_UNPARENTED")
 
 
 ## Starts one turn in a background thread — OS.execute() blocks, and a
@@ -171,12 +184,18 @@ func _notification(what: int) -> void:
 ## the main thread would freeze the whole editor UI, not just this dock.
 ## Emits turn_finished (via call_deferred, so it lands safely on the main
 ## thread) when the subprocess returns, one way or another.
-func send(message: String, model: String = "", provider: String = "") -> void:
+func send(
+	message: String,
+	model: String = "",
+	provider: String = "",
+	mode: String = MODE_SAFE_REVIEW
+) -> void:
 	if _thread and _thread.is_started():
 		_thread.wait_to_finish()
 	var hermes_path := find_hermes_executable()
 	_thread = Thread.new()
-	_thread.start(_run_hermes.bind(hermes_path, message, session_id, model, provider, project_root()))
+	_bridge_trace("send: starting new turn thread")
+	_thread.start(_run_hermes.bind(hermes_path, message, session_id, model, provider, project_root(), mode))
 
 
 ## Marks the currently in-flight reply to be discarded once it returns.
@@ -192,7 +211,38 @@ func request_stop() -> void:
 	_discard_pending = true
 
 
-func _run_hermes(hermes_path: String, message: String, resume_session_id: String, model: String, provider: String, cwd: String) -> void:
+## INSTRUMENTATION — thin wrapper around the actual thread body
+## (_run_hermes_impl, unchanged below) so _thread_body_active is set/
+## cleared around EVERY return path in one place, instead of having to
+## chase down each of _run_hermes_impl's own early returns individually.
+## Thread.start() still binds to this exact function name/signature —
+## nothing about how the thread is started changes.
+func _run_hermes(
+	hermes_path: String,
+	message: String,
+	resume_session_id: String,
+	model: String,
+	provider: String,
+	cwd: String,
+	mode: String
+) -> void:
+	_thread_body_active = true
+	_bridge_trace("_run_hermes: thread body entered")
+	_run_hermes_impl(hermes_path, message, resume_session_id, model, provider, cwd, mode)
+	_bridge_trace("_run_hermes: thread body returning")
+	_thread_body_active = false
+
+
+func _run_hermes_impl(
+	hermes_path: String,
+	message: String,
+	resume_session_id: String,
+	model: String,
+	provider: String,
+	cwd: String,
+	mode: String
+) -> void:
+	var effective_mode := normalize_mode(mode)
 	var result := {
 		"success": false,
 		"response": "",
@@ -200,6 +250,10 @@ func _run_hermes(hermes_path: String, message: String, resume_session_id: String
 		"error": "",
 		"live_tree_changes": PackedStringArray(),
 		"safety_check_available": false,
+		"mode": effective_mode,
+		"edit_id": "",
+		"edit_receipt_state": "",
+		"edit_receipt_paths": [],
 	}
 
 	if hermes_path.is_empty():
@@ -217,7 +271,22 @@ func _run_hermes(hermes_path: String, message: String, resume_session_id: String
 	# below still works correctly either way: SCRATCH_DIR_NAME is
 	# excluded from the walk regardless of whether the directory exists
 	# yet or is gitignored.
-	var fingerprint_before := _capture_tree_fingerprint(cwd)
+	# DIRECT_WRITE additionally keeps the pre-turn BYTES (not just hashes)
+	# in memory for the duration of this one turn, so a per-edit revert
+	# receipt can be built after the fact from whichever paths actually
+	# changed — see edit_receipt_store.gd's own top-of-file doc. SAFE/
+	# REVIEW keeps the cheaper hash-only fingerprint since nothing on
+	# disk is expected to change in that mode.
+	var edit_id := ""
+	var snapshot_before := {}
+	var fingerprint_before := {}
+	if effective_mode == MODE_DIRECT_WRITE:
+		edit_id = EditReceiptStore.generate_edit_id()
+		snapshot_before = EditReceiptStore.capture_tree_snapshot(cwd)
+		for k in snapshot_before.keys():
+			fingerprint_before[k] = (snapshot_before[k] as Dictionary)["sha256"]
+	else:
+		fingerprint_before = _capture_tree_fingerprint(cwd)
 	result["safety_check_available"] = true  # filesystem walk, not git-dependent — see _capture_tree_fingerprint()
 
 	var unique := "%d_%d" % [Time.get_ticks_usec(), randi()]
@@ -225,7 +294,7 @@ func _run_hermes(hermes_path: String, message: String, resume_session_id: String
 	var query_path := tmp_dir.path_join("hermes_editor_query_%s.txt" % unique)
 	var script_path := tmp_dir.path_join("hermes_editor_run_%s.sh" % unique)
 
-	var full_message := build_safe_mode_preamble(cwd) + message
+	var full_message := build_mode_message(effective_mode, cwd, message)
 	var write_err := _write_query_file(query_path, full_message)
 	if write_err != OK:
 		result["error"] = "failed to write temp query file (%s): error %d" % [query_path, write_err]
@@ -257,6 +326,15 @@ func _run_hermes(hermes_path: String, message: String, resume_session_id: String
 	# that were already dirty/untracked before the turn started).
 	var fingerprint_after := _capture_tree_fingerprint(cwd)
 	result["live_tree_changes"] = diff_tree_fingerprints(fingerprint_before, fingerprint_after)
+
+	# One receipt per DIRECT_WRITE turn that actually touched the live
+	# tree — mechanical revert bookkeeping only; no bearing on whether
+	# this turn itself succeeded or failed. See edit_receipt_store.gd.
+	if effective_mode == MODE_DIRECT_WRITE and not result["live_tree_changes"].is_empty():
+		var receipt := EditReceiptStore.create_receipt(edit_id, snapshot_before, fingerprint_after)
+		result["edit_id"] = edit_id
+		result["edit_receipt_state"] = receipt.get("state", "AVAILABLE")
+		result["edit_receipt_paths"] = receipt.get("paths", [])
 
 	var sid := extract_session_id(combined)
 	if not sid.is_empty():
@@ -291,6 +369,25 @@ static func build_safe_mode_preamble(project_root: String) -> String:
 		+ "\n"
 	)
 	return template % [project_root, SCRATCH_DIR_NAME, SCRATCH_DIR_NAME, SCRATCH_DIR_NAME]
+
+
+static func build_direct_write_preamble(project_root: String) -> String:
+	return (
+		"TEMPORARY DIRECT WRITE MODE is active for this turn. This explicitly supersedes every earlier SAFE/REVIEW or scratch-only instruction in the resumed session. The user has authorized you to modify the LIVE project directly (working directory: %s), including creating, modifying, moving, renaming, or deleting files when the request requires it. Do not route the requested implementation through .hermes_scratch/. Apply the user's natural request to the live project.\n"
+		+ "\n"
+		+ "This is a temporary maturity experiment, not broad maintenance authorization: make only the requested edit; do not commit, push, clean up unrelated files, or change unrelated project settings.\n"
+		+ "\n---\n\n"
+	) % project_root
+
+
+static func normalize_mode(mode: String) -> String:
+	return MODE_DIRECT_WRITE if mode == MODE_DIRECT_WRITE else MODE_SAFE_REVIEW
+
+
+static func build_mode_message(mode: String, project_root: String, message: String) -> String:
+	if normalize_mode(mode) == MODE_DIRECT_WRITE:
+		return build_direct_write_preamble(project_root) + message
+	return build_safe_mode_preamble(project_root) + message
 
 
 ## Creates the scratch dir if missing and makes sure it's gitignored, so
