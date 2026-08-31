@@ -759,3 +759,198 @@ def test_hard_correlation_rejection_skips_provider_and_reports_stable_code(
     assert response["perception_result"]["effective_state"] == "rejected"
     assert response["perception_result"]["failure_code"] == "CLIENT_REQUEST_ID_MISMATCH"
     assert response["perception_result"]["viewport_image_attached"] is False
+
+
+# --- Phase 1 sideband coordination lane (Dragon <-> Editor) ---------------
+
+
+def _write_editor_report(
+    config: Any, *, message_id: str = "MSG_TEST_1", attempt: int = 0
+) -> Path:
+    module = _adapter_module()
+    config.coordination_inbox_dir.mkdir(parents=True, exist_ok=True)
+    report = {
+        "schema": module.EDITOR_REPORT_SCHEMA_ID,
+        "message_id": message_id,
+        "parent_message_id": "dragonreq_test",
+        "source": "editor",
+        "destination": "dragon3d",
+        "kind": "edit_report",
+        "created_at": time.time(),
+        "edit_id": "20260830_000000_test",
+        "edit_receipt_state": "CONSUMED",
+        "status": "applied",
+        "files_created": [],
+        "files_modified": ["res://scripts/DragonAvatar3D.gd"],
+        "files_deleted": [],
+        "execution_summary": "Modified 1 file(s).",
+        "errors": [],
+        "warnings": [],
+        "validation_result": {"status": "not_checked", "checks": []},
+        "runtime_result": {"status": "not_checked"},
+        "body": "Edit applied.",
+    }
+    path = config.coordination_inbox_dir / f"editor_report.{message_id}.attempt{attempt}.json"
+    path.write_text(json.dumps(report))
+    return path
+
+
+def test_coordination_report_is_claimed_and_read_back_intact(tmp_path: Path) -> None:
+    adapter = _adapter(tmp_path)
+    _write_editor_report(adapter.config, message_id="MSGA")
+
+    claim = adapter._claim_coordination_report()
+    assert claim is not None
+    claimed_path, original_basename, attempt = claim
+    assert original_basename == "editor_report.MSGA.attempt0.json"
+    assert attempt == 0
+    assert not (adapter.config.coordination_inbox_dir / original_basename).exists()
+
+    report = adapter._read_coordination_report(claimed_path)
+    assert report is not None
+    assert report["message_id"] == "MSGA"
+    assert report["schema"] == _adapter_module().EDITOR_REPORT_SCHEMA_ID
+
+
+def test_malformed_coordination_report_is_rejected_not_trusted(tmp_path: Path) -> None:
+    adapter = _adapter(tmp_path)
+    adapter.config.coordination_inbox_dir.mkdir(parents=True, exist_ok=True)
+    bad_path = adapter.config.coordination_inbox_dir / "editor_report.MSGB.attempt0.json"
+    bad_path.write_text(json.dumps({"schema": "wrong.schema.v1"}))
+
+    claim = adapter._claim_coordination_report()
+    assert claim is not None
+    claimed_path, _basename, _attempt = claim
+    assert adapter._read_coordination_report(claimed_path) is None
+
+
+def test_coordination_report_disposal_increments_attempt_on_failure(tmp_path: Path) -> None:
+    adapter = _adapter(tmp_path)
+    _write_editor_report(adapter.config, message_id="MSGC")
+
+    claimed_path, basename, attempt = adapter._claim_coordination_report()
+    adapter._dispose_coordination_report(claimed_path, basename, attempt, succeeded=False)
+
+    next_path = adapter.config.coordination_inbox_dir / "editor_report.MSGC.attempt1.json"
+    assert next_path.exists()
+    assert not claimed_path.exists()
+
+
+def test_coordination_report_moves_to_failed_after_max_attempts(tmp_path: Path) -> None:
+    module = _adapter_module()
+    adapter = _adapter(tmp_path)
+    # Start at attempt (COORDINATION_MAX_ATTEMPTS - 1) -- the third try.
+    _write_editor_report(
+        adapter.config, message_id="MSGD", attempt=module.COORDINATION_MAX_ATTEMPTS - 1
+    )
+
+    claimed_path, basename, attempt = adapter._claim_coordination_report()
+    adapter._dispose_coordination_report(claimed_path, basename, attempt, succeeded=False)
+
+    failed_path = adapter.config.coordination_failed_dir / basename
+    assert failed_path.exists()
+    assert not (adapter.config.coordination_inbox_dir / basename).exists()
+    # Never replayed a fourth time.
+    assert not list(adapter.config.coordination_inbox_dir.glob("editor_report.MSGD.*"))
+
+
+def test_coordination_report_structural_refusal_keeps_same_attempt(tmp_path: Path) -> None:
+    adapter = _adapter(tmp_path)
+    _write_editor_report(adapter.config, message_id="MSGE", attempt=1)
+
+    claimed_path, basename, attempt = adapter._claim_coordination_report()
+    assert attempt == 1
+    adapter._dispose_coordination_report(
+        claimed_path, basename, attempt, succeeded=False, structural_refusal=True
+    )
+    # Structural refusal (continuity-dispatch conflict) is not the report's
+    # own fault -- it must NOT erode its retry budget.
+    restored_path = adapter.config.coordination_inbox_dir / "editor_report.MSGE.attempt1.json"
+    assert restored_path.exists()
+    assert not (adapter.config.coordination_inbox_dir / "editor_report.MSGE.attempt2.json").exists()
+
+
+def test_coordination_report_success_moves_to_consumed_unchanged(tmp_path: Path) -> None:
+    adapter = _adapter(tmp_path)
+    _write_editor_report(adapter.config, message_id="MSGF")
+
+    claimed_path, basename, attempt = adapter._claim_coordination_report()
+    original_bytes = claimed_path.read_bytes()
+    adapter._dispose_coordination_report(claimed_path, basename, attempt, succeeded=True)
+
+    consumed_path = adapter.config.coordination_consumed_dir / basename
+    assert consumed_path.exists()
+    assert consumed_path.read_bytes() == original_bytes  # payload never mutated, only relocated
+
+
+def test_format_messages_includes_labeled_coordination_report_when_pending(tmp_path: Path) -> None:
+    adapter = _adapter(tmp_path)
+    report = {
+        "schema": _adapter_module().EDITOR_REPORT_SCHEMA_ID,
+        "message_id": "MSGG",
+        "body": "Edit applied.",
+    }
+    adapter.client.pending_coordination = report
+    prompt = adapter.client._format_messages(
+        [{"role": "user", "content": "hello"}]
+    )
+    assert "<COORDINATION_REPORT>" in prompt
+    assert "PROVENANCE=EDITOR_REPORT" in prompt
+    assert "This is not something the player said" in prompt
+    marker = "EDITOR_REPORT_JSON_BASE64="
+    encoded_line = next(line for line in prompt.split("\n") if line.startswith(marker))
+    decoded = json.loads(base64.b64decode(encoded_line[len(marker) :]).decode("utf-8"))
+    assert decoded == report
+
+
+def test_format_messages_omits_coordination_report_when_absent(tmp_path: Path) -> None:
+    adapter = _adapter(tmp_path)
+    assert adapter.client.pending_coordination is None
+    prompt = adapter.client._format_messages([{"role": "user", "content": "hello"}])
+    assert "<COORDINATION_REPORT>" not in prompt
+
+
+def test_extract_editor_directive_publishes_and_strips_block(tmp_path: Path) -> None:
+    adapter = _adapter(tmp_path)
+    safe_response = {
+        "narrative_response": (
+            "The gate looks unfinished.\n\n"
+            "[EDITOR_REQUEST]\nPut a reversible beacon gate around VIOLET-7319.\n[/EDITOR_REQUEST]"
+        ),
+        "client_request_id": "dragon3d_client_1",
+    }
+    result = adapter._extract_editor_directive(dict(safe_response))
+    assert result["narrative_response"] == "The gate looks unfinished."
+
+    outbox_files = list(adapter.config.coordination_outbox_dir.glob("*.json"))
+    assert len(outbox_files) == 1
+    published = json.loads(outbox_files[0].read_text())
+    assert published["schema"] == _adapter_module().DRAGON_REQUEST_SCHEMA_ID
+    assert published["body"] == "Put a reversible beacon gate around VIOLET-7319."
+    assert published["parent_message_id"] == "dragon3d_client_1"
+    assert published["source"] == "dragon3d"
+    assert published["destination"] == "editor"
+
+
+def test_extract_editor_directive_falls_back_to_acknowledgement_when_directive_only(
+    tmp_path: Path,
+) -> None:
+    module = _adapter_module()
+    adapter = _adapter(tmp_path)
+    safe_response = {
+        "narrative_response": "[EDITOR_REQUEST]\nBuild a bridge.\n[/EDITOR_REQUEST]",
+        "client_request_id": "dragon3d_client_2",
+    }
+    result = adapter._extract_editor_directive(dict(safe_response))
+    assert result["narrative_response"] == module.DIRECTIVE_ONLY_ACKNOWLEDGEMENT
+    assert result["narrative_response"] != ""
+
+
+def test_extract_editor_directive_passthrough_when_no_marker(tmp_path: Path) -> None:
+    adapter = _adapter(tmp_path)
+    safe_response = {
+        "narrative_response": "Just ordinary dragon speech, nothing to route.",
+        "client_request_id": "dragon3d_client_3",
+    }
+    result = adapter._extract_editor_directive(dict(safe_response))
+    assert result == safe_response

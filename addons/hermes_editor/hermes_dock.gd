@@ -28,6 +28,12 @@ var _provider_input: LineEdit
 var _mode_selector: OptionButton
 var _restart_runtime_button: Button
 var _receipts_list: VBoxContainer
+var _dragon_requests_list: VBoxContainer
+var _dragon_request_rows: Dictionary = {}  # outbox path (String) -> row Control
+var _pending_dragon_request: Dictionary = {}  # {} when no coordination turn is in flight
+var _pending_dragon_request_path: String = ""
+var _dragon_poll_accumulator_sec: float = 0.0
+const _DRAGON_POLL_INTERVAL_SEC := 1.0
 
 
 func _ready() -> void:
@@ -65,12 +71,28 @@ func _notification(what: int) -> void:
 		_dock_trace("_notification: NOTIFICATION_UNPARENTED")
 
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
 	# Existing editor docks survive script hot reload. Upgrade the old,
 	# disabled DIRECT WRITE row in place so the bridge node — and its
 	# in-memory Hermes session_id — do not have to be destroyed/recreated.
 	if not _temporary_trial_ui_applied and not _busy:
 		_ensure_temporary_trial_ui()
+
+	# Phase 1 sideband coordination lane: cheap, throttled discovery poll
+	# of the shared outbox (see hermes_bridge.gd's own "Phase 1 sideband
+	# coordination lane" block). Discovery is non-destructive — a request
+	# only leaves the outbox once a human has actually executed it (see
+	# _process_dragon_coordination_request()) — so polling repeatedly is
+	# safe; _dragon_request_rows just prevents re-adding a row for one
+	# already shown.
+	_dragon_poll_accumulator_sec += delta
+	if _dragon_poll_accumulator_sec < _DRAGON_POLL_INTERVAL_SEC:
+		return
+	_dragon_poll_accumulator_sec = 0.0
+	for entry in HermesBridgeScript.list_pending_dragon_requests():
+		var path: String = entry["path"]
+		if not _dragon_request_rows.has(path):
+			_add_dragon_request_row(entry["request"], path)
 
 
 func _ensure_temporary_trial_ui() -> void:
@@ -157,6 +179,26 @@ func _build_ui() -> void:
 	_receipts_list = VBoxContainer.new()
 	_receipts_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	receipts_scroll.add_child(_receipts_list)
+
+	# Phase 1 sideband coordination lane. Human-confirm only, deliberately
+	# — see hermes_bridge.gd's own list_pending_dragon_requests()/
+	# write_editor_report() doc and _process_dragon_coordination_request()
+	# below. A pending Dragon request never runs on its own; it only ever
+	# runs because a human pressed this button, and it always runs as
+	# DIRECT_WRITE — the request body itself never selects or escalates
+	# authority mode.
+	var dragon_requests_label := Label.new()
+	dragon_requests_label.text = "Pending Dragon requests (human-confirm, DIRECT_WRITE):"
+	root.add_child(dragon_requests_label)
+
+	var dragon_requests_scroll := ScrollContainer.new()
+	dragon_requests_scroll.custom_minimum_size = Vector2(0, 90)
+	dragon_requests_scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	root.add_child(dragon_requests_scroll)
+
+	_dragon_requests_list = VBoxContainer.new()
+	_dragon_requests_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	dragon_requests_scroll.add_child(_dragon_requests_list)
 
 	var input_row := HBoxContainer.new()
 	input_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -277,6 +319,29 @@ func _on_turn_finished(result: Dictionary) -> void:
 		elif receipt_state == "ERROR":
 			_append_transcript("⚠ Edit receipt for %s could not be fully backed up — Revert is unavailable for this edit. Inspect changes manually (git diff / git status)." % edit_id)
 
+	# Phase 1 sideband coordination lane: if this turn was executed via
+	# _process_dragon_coordination_request(), file the Editor report
+	# regardless of whether the turn succeeded or failed — the report's
+	# whole job is to say what happened, including a failure, and Dragon
+	# should hear about a failure just as much as a success. Captured and
+	# cleared here, unconditionally, before either branch below returns.
+	if not _pending_dragon_request.is_empty():
+		var completed_request := _pending_dragon_request
+		var completed_path := _pending_dragon_request_path
+		_pending_dragon_request = {}
+		_pending_dragon_request_path = ""
+		var write_err := HermesBridgeScript.write_editor_report(completed_request, result)
+		if write_err != OK:
+			_append_transcript("⚠ Could not file the Editor report back to Dragon (error %d) — the edit itself is unaffected, but Dragon will not hear about it this turn." % write_err)
+		HermesBridgeScript.mark_dragon_request_handled(completed_path)
+		var entry: Variant = _dragon_request_rows.get(completed_path)
+		if typeof(entry) == TYPE_DICTIONARY:
+			var row: Control = entry.get("row")
+			if row != null and is_instance_valid(row):
+				row.queue_free()
+		_dragon_request_rows.erase(completed_path)
+		_append_transcript("[editor→dragon] report filed for: " + String(completed_request.get("body", "")))
+
 	if not result.get("success", false):
 		_append_transcript("[error] " + String(result.get("error", "unknown error")))
 		_status_label.text = "SAFETY VIOLATION + error — see transcript." if safety_violation else "Error — see transcript."
@@ -345,3 +410,95 @@ func _on_revert_pressed(edit_id: String, summary_label: Label, button: Button) -
 			button.disabled = false
 			button.text = "Revert this edit"
 			_status_label.text = message.split("\n")[0]
+
+
+## One row per pending Dragon coordination request discovered in the
+## shared outbox. The Execute button is the ONLY thing that ever triggers
+## _process_dragon_coordination_request() in Phase 1 — nothing here
+## auto-runs a Dragon request.
+##
+## _dragon_request_rows[path] holds {row, summary, button, idle_text} —
+## not just the row Control — so both the click handler below and
+## _reset_dragon_request_row() can update/restore the row precisely
+## without hunting through get_children().
+func _add_dragon_request_row(request: Dictionary, path: String) -> void:
+	var row := HBoxContainer.new()
+	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+
+	var summary := Label.new()
+	var body := String(request.get("body", ""))
+	var preview := "Dragon: " + (body if body.length() <= 120 else body.substr(0, 117) + "...")
+	summary.text = preview
+	summary.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	summary.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	row.add_child(summary)
+
+	var execute_button := Button.new()
+	execute_button.text = "Execute (DIRECT_WRITE)"
+	execute_button.tooltip_text = "Runs this Dragon-recommended edit through the existing Editor DIRECT_WRITE path — same receipt/revert guarantees as any other edit. The request cannot select or escalate authority mode; DIRECT_WRITE is fixed for this first proof."
+	row.add_child(execute_button)
+
+	_dragon_requests_list.add_child(row)
+	_dragon_request_rows[path] = {
+		"row": row, "summary": summary, "button": execute_button, "idle_text": preview,
+	}
+
+	execute_button.pressed.connect(
+		func() -> void:
+			# Immediate, unmissable feedback the instant the button is
+			# pressed — not only once the turn eventually finishes. A
+			# real Hermes turn can run for minutes; a merely-disabled
+			# button is too easy to miss, especially with the runtime
+			# debug window often sitting on top of this dock. This was
+			# the exact gap reported after the first live proof.
+			execute_button.disabled = true
+			execute_button.text = "Running..."
+			summary.text = "⏳ WORKING — " + preview
+			_process_dragon_coordination_request(request, path, HermesBridgeScript.MODE_DIRECT_WRITE)
+	)
+
+
+func _reset_dragon_request_row(path: String) -> void:
+	var entry: Variant = _dragon_request_rows.get(path)
+	if typeof(entry) != TYPE_DICTIONARY:
+		return
+	var button: Button = entry.get("button")
+	var summary: Label = entry.get("summary")
+	if button != null and is_instance_valid(button):
+		button.disabled = false
+		button.text = "Execute (DIRECT_WRITE)"
+	if summary != null and is_instance_valid(summary):
+		summary.text = String(entry.get("idle_text", summary.text))
+
+
+## Reusable processing operation: Phase 1 calls this from the Execute
+## button above; a future auto-run path calls exactly this same function
+## with no human click in between. Human confirmation is a temporary
+## Phase-1 trigger, not part of the message protocol — everything this
+## function does is identical either way.
+##
+## Reuses the existing send()/turn_finished path rather than duplicating
+## it: this is exactly the same call _on_send_pressed() makes, just with
+## the message body and mode sourced from a Dragon request instead of the
+## input field. mode is an explicit caller-supplied argument — never read
+## from `request` — so a Dragon request can never choose or escalate its
+## own authority mode.
+func _process_dragon_coordination_request(request: Dictionary, path: String, mode: String) -> void:
+	if _busy or not _pending_dragon_request.is_empty():
+		_append_transcript("⚠ Dragon request ignored: a turn is already in flight. Try again once it finishes.")
+		_reset_dragon_request_row(path)
+		return
+	var body := String(request.get("body", ""))
+	if body.is_empty():
+		_append_transcript("⚠ Dragon request has an empty body; refusing to execute.")
+		_reset_dragon_request_row(path)
+		return
+	_pending_dragon_request = request
+	_pending_dragon_request_path = path
+	_append_transcript("[dragon→editor] " + body)
+	_busy = true
+	_send_button.disabled = true
+	_stop_button.disabled = false
+	_mode_selector.disabled = true
+	_status_label.text = "⏳ Processing Dragon coordination request (DIRECT_WRITE)... a real Hermes turn can take a few minutes."
+	_bridge.send(body, _model_input.text.strip_edges(), _provider_input.text.strip_edges(), mode)

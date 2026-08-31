@@ -3,6 +3,7 @@
 [ext_resource type="PackedScene" uid="uid://dyw2rrveeb13w" path="res://scenes/DragonAvatar3D.tscn" id="1_dragon"]
 [ext_resource type="PackedScene" uid="uid://b1ytp8j8x7g6k" path="res://scenes/ControlHUD.tscn" id="2_hud"]
 [ext_resource type="Script" uid="uid://cf2n754qegumo" path="res://scripts/Main.gd" id="3_main"]
+[ext_resource type="PackedScene" path="res://scenes/FirstLightTower.tscn" id="4_tower"]
 
 [sub_resource type="PlaneMesh" id="PlaneMesh_ground"]
 size = Vector2(20, 20)
@@ -24,6 +25,9 @@ mesh = SubResource("PlaneMesh_ground")
 
 [node name="DragonAvatar3D" parent="World" unique_id=1183454696 instance=ExtResource("1_dragon")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.693476, 1.2950282, -1.3300718)
+
+[node name="FirstLightTower" parent="World" instance=ExtResource("4_tower")]
+position = Vector3(-7.5, 0, -8.25)
 
 [node name="UI" type="CanvasLayer" parent="." unique_id=636635132]
 

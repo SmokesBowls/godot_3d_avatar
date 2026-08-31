@@ -119,6 +119,23 @@ const SCRATCH_DIR_NAME := ".hermes_scratch"
 const MODE_SAFE_REVIEW := "SAFE_REVIEW"
 const MODE_DIRECT_WRITE := "DIRECT_WRITE"
 
+## Phase 1 sideband coordination lane (Dragon <-> Editor). This absolute
+## path is NOT under project_root() — it's the same shared mailbox root
+## hermes_session_adapter.py (in this same checkout, but the OTHER Godot
+## process — the 3D runtime, not this editor) reads/writes from. See that
+## file's own "Phase 1 sideband coordination lane" block for the adapter
+## side of this exact contract: same directory names, same filename
+## convention, same schema IDs.
+const COORDINATION_ROOT := "/mnt/data-drive/engain-runtime-mailboxes/dragon3d/coordination"
+const COORDINATION_OUTBOX_DIR := COORDINATION_ROOT + "/outbox"
+const COORDINATION_OUTBOX_HANDLED_DIR := COORDINATION_ROOT + "/outbox_handled"
+const COORDINATION_INBOX_DIR := COORDINATION_ROOT + "/inbox"
+const DRAGON_REQUEST_SCHEMA_ID := "engain.dragon_request.v1"
+const EDITOR_REPORT_SCHEMA_ID := "engain.editor_report.v1"
+const DRAGON_REQUEST_KEYS: Array[String] = [
+	"schema", "message_id", "parent_message_id", "source", "destination", "body", "created_at",
+]
+
 
 ## The real, absolute filesystem path of the currently open Godot
 ## project — this is the `cwd` Hermes's own file/shell tools will
@@ -484,24 +501,38 @@ static func diff_live_tree_changes(before_lines: PackedStringArray, after_lines:
 
 
 ## THE SAFETY AUTHORITY. Walks project_root recursively (excluding
-## SCRATCH_DIR_NAME and .git/ — see the exclusion list below) and
-## returns a Dictionary of {relative_path: sha256_hex} for every real
-## file found. Directories themselves aren't fingerprinted (a create/
-## delete of a directory is already implied by its files' own entries
-## appearing/disappearing in the map).
+## SCRATCH_DIR_NAME, .git/, and .godot/ — see the exclusion list below)
+## and returns a Dictionary of {relative_path: sha256_hex} for every
+## real file found. Directories themselves aren't fingerprinted (a
+## create/delete of a directory is already implied by its files' own
+## entries appearing/disappearing in the map).
 ##
 ## .git/ is excluded deliberately, not incidentally: `git status` itself
 ## (called elsewhere for the optional display helper above) can rewrite
 ## .git/index for its own stat-cache bookkeeping — fingerprinting .git/
 ## internals would risk flagging that as a "violation" with nothing to
 ## do with anything Hermes did.
+##
+## .godot/ is excluded for the identical reason, confirmed against a
+## real receipt: a DIRECT_WRITE turn that Hermes limited to
+## scenes/Main.tscn nonetheless produced a fingerprint diff that also
+## included .godot/editor/filesystem_cache10 — Godot's own editor
+## filesystem cache, rewritten by the editor's own scan/reimport
+## machinery (e.g. after a "Reload from disk" following an external
+## edit), not authored by Hermes or the user. Without this exclusion,
+## every DIRECT_WRITE receipt risks silently absorbing Godot's own
+## housekeeping writes as if they were part of the requested edit — and
+## since that cache can keep changing between when a receipt is created
+## and when its Revert is eventually pressed, an otherwise-legitimate
+## revert could be refused later for a mismatch that has nothing to do
+## with what the user or Hermes actually changed.
 static func _capture_tree_fingerprint(project_root: String) -> Dictionary:
 	var fingerprint := {}
 	_walk_and_fingerprint(project_root, project_root, fingerprint)
 	return fingerprint
 
 
-const _FINGERPRINT_EXCLUDED_DIR_NAMES := [".git", SCRATCH_DIR_NAME]
+const _FINGERPRINT_EXCLUDED_DIR_NAMES := [".git", ".godot", SCRATCH_DIR_NAME]
 
 
 static func _walk_and_fingerprint(root: String, current_dir: String, out: Dictionary) -> void:
@@ -700,3 +731,262 @@ static func find_hermes_executable() -> String:
 	if which_exit == 0 and not which_output.is_empty():
 		return String(which_output[0]).strip_edges()
 	return ""
+
+
+## --- Phase 1 sideband coordination lane (Dragon <-> Editor) --------------
+##
+## Reusable, non-UI mechanics only. hermes_dock.gd owns sequencing
+## (busy-state, calling send(), reacting to turn_finished) — same division
+## of responsibility as everywhere else in this file.
+
+## Lists every syntactically-valid pending Dragon request currently sitting
+## in COORDINATION_OUTBOX_DIR, oldest filename first. Malformed entries are
+## silently skipped here (not deleted, not surfaced as an error) — an
+## adapter-side bug producing a bad file should not crash or spam this
+## dock; it just never becomes a visible pending request until fixed.
+## Returns an Array of {"path": String, "request": Dictionary}.
+static func list_pending_dragon_requests() -> Array:
+	var out: Array = []
+	var dir := DirAccess.open(COORDINATION_OUTBOX_DIR)
+	if dir == null:
+		return out
+	dir.list_dir_begin()
+	var names: PackedStringArray = []
+	var entry_name := dir.get_next()
+	while entry_name != "":
+		if not dir.current_is_dir() and entry_name.ends_with(".json"):
+			names.append(entry_name)
+		entry_name = dir.get_next()
+	dir.list_dir_end()
+	names.sort()
+	for name in names:
+		var full_path := COORDINATION_OUTBOX_DIR.path_join(name)
+		var request := _read_dragon_request(full_path)
+		if not request.is_empty():
+			out.append({"path": full_path, "request": request})
+	return out
+
+
+static func _read_dragon_request(path: String) -> Dictionary:
+	if not FileAccess.file_exists(path):
+		return {}
+	var reader := FileAccess.open(path, FileAccess.READ)
+	if reader == null:
+		return {}
+	var text := reader.get_as_text()
+	reader.close()
+	var parsed: Variant = JSON.parse_string(text)
+	if typeof(parsed) != TYPE_DICTIONARY:
+		return {}
+	var payload: Dictionary = parsed
+	var keys := payload.keys()
+	if keys.size() != DRAGON_REQUEST_KEYS.size():
+		return {}
+	for key in keys:
+		if key not in DRAGON_REQUEST_KEYS:
+			return {}
+	if payload.get("schema") != DRAGON_REQUEST_SCHEMA_ID:
+		return {}
+	if payload.get("source") != "dragon3d" or payload.get("destination") != "editor":
+		return {}
+	if typeof(payload.get("message_id")) != TYPE_STRING or String(payload["message_id"]).is_empty():
+		return {}
+	if typeof(payload.get("body")) != TYPE_STRING:
+		return {}
+	return payload
+
+
+## Moves a handled request out of the outbox so list_pending_dragon_requests()
+## never shows it again. Relocated, not deleted — same "don't destroy
+## evidence" convention as the rest of this project's mailbox handling.
+static func mark_dragon_request_handled(path: String) -> void:
+	var handled_dir := COORDINATION_OUTBOX_HANDLED_DIR
+	if not DirAccess.dir_exists_absolute(handled_dir):
+		DirAccess.make_dir_recursive_absolute(handled_dir)
+	var dest := handled_dir.path_join(path.get_file())
+	if FileAccess.file_exists(dest):
+		dest = handled_dir.path_join("%s.%d%s" % [dest.get_basename().get_file(), Time.get_unix_time_from_system(), dest.get_extension()])
+	DirAccess.rename_absolute(path, dest)
+
+
+## Writes one engain.editor_report.v1 envelope into COORDINATION_INBOX_DIR,
+## named exactly the way hermes_session_adapter.py's
+## COORDINATION_REPORT_FILENAME_PATTERN expects
+## (editor_report.<message_id>.attempt0.json) so the adapter's own claim
+## logic picks it up with zero coordination needed beyond the shared
+## directory/filename contract. edit_id is the durable link back to the
+## mechanical edit receipt (see edit_receipt_store.gd) — the full receipt
+## is never duplicated into this report; this only says what happened.
+## Splits diff_tree_fingerprints()'s own "created: X" / "modified: Y" /
+## "deleted: Z" lines into three plain res://-prefixed path arrays.
+## diff_tree_fingerprints() never emits any other prefix, but this stays
+## defensive (an unrecognized line is silently dropped, not guessed at)
+## rather than assuming its own caller's format can never change.
+static func _split_live_tree_changes(changes: PackedStringArray) -> Dictionary:
+	var created: Array = []
+	var modified: Array = []
+	var deleted: Array = []
+	for change in changes:
+		var line := String(change)
+		if line.begins_with("created: "):
+			created.append("res://" + line.substr("created: ".length()))
+		elif line.begins_with("modified: "):
+			modified.append("res://" + line.substr("modified: ".length()))
+		elif line.begins_with("deleted: "):
+			deleted.append("res://" + line.substr("deleted: ".length()))
+	return {"created": created, "modified": modified, "deleted": deleted}
+
+
+## Mechanical headless validation of the changed .gd/.tscn paths from a
+## SUCCESSFUL DIRECT_WRITE turn — see coordination_report_validator.gd's
+## own top-of-file doc for exactly what it does and does not prove (disk-
+## level parse/load/instantiate, never "did the runtime actually behave
+## correctly"). Spawns a fresh headless Godot process rather than the
+## editor's own running instance: `--check-only` cannot instantiate a
+## scene (it parses one script and quits, never running a script's own
+## _init()), so a real, separate `-s <validator>` run is required. Returns
+## {"status": "not_checked", "checks": []} for an empty input, for a
+## spawn/parse failure, or for anything else that would otherwise require
+## inventing a result — never a fabricated "passed".
+static func run_coordination_validation(current_project_root: String, changed_paths: Array) -> Dictionary:
+	var checkable: Array = []
+	for p in changed_paths:
+		var path_str := String(p)
+		if path_str.ends_with(".gd") or path_str.ends_with(".tscn"):
+			checkable.append(path_str)
+	if checkable.is_empty():
+		return {"status": "not_checked", "checks": []}
+
+	var tmp_dir := OS.get_temp_dir()
+	var unique := "%d_%d" % [Time.get_ticks_usec(), randi()]
+	var paths_file := tmp_dir.path_join("hermes_editor_validate_paths_%s.json" % unique)
+	var output_file := tmp_dir.path_join("hermes_editor_validate_result_%s.json" % unique)
+	var writer := FileAccess.open(paths_file, FileAccess.WRITE)
+	if writer == null:
+		return {"status": "not_checked", "checks": []}
+	writer.store_string(JSON.stringify(checkable))
+	writer.close()
+
+	var validator_script := ProjectSettings.globalize_path(
+		"res://addons/hermes_editor/coordination_report_validator.gd"
+	)
+	var args := PackedStringArray([
+		"--headless", "--path", current_project_root, "-s", validator_script,
+		"--", paths_file, output_file,
+	])
+	var output: Array = []
+	OS.execute(OS.get_executable_path(), args, output, true)
+
+	var result := {"status": "not_checked", "checks": []}
+	if FileAccess.file_exists(output_file):
+		var reader := FileAccess.open(output_file, FileAccess.READ)
+		if reader != null:
+			var parsed: Variant = JSON.parse_string(reader.get_as_text())
+			reader.close()
+			if typeof(parsed) == TYPE_DICTIONARY:
+				result = parsed
+	if FileAccess.file_exists(paths_file):
+		DirAccess.remove_absolute(paths_file)
+	if FileAccess.file_exists(output_file):
+		DirAccess.remove_absolute(output_file)
+	return result
+
+
+## Phase 1C-1 structured fact report. body is kept ONLY as a human-
+## readable summary — every fact Dragon needs is its own field; nothing
+## requires re-parsing prose. See this file's own "Phase 1 sideband
+## coordination lane" doc and EDITOR_REPORT_KEYS in
+## hermes_session_adapter.py (which MUST be kept in exact sync with this
+## shape — the adapter validates by exact key match).
+static func write_editor_report(dragon_request: Dictionary, edit_result: Dictionary) -> Error:
+	if not DirAccess.dir_exists_absolute(COORDINATION_INBOX_DIR):
+		DirAccess.make_dir_recursive_absolute(COORDINATION_INBOX_DIR)
+	var message_id := EditReceiptStore.generate_edit_id()
+	var succeeded: bool = edit_result.get("success", false)
+	var changes: PackedStringArray = edit_result.get("live_tree_changes", PackedStringArray())
+	var split := _split_live_tree_changes(changes)
+	var files_created: Array = split["created"]
+	var files_modified: Array = split["modified"]
+	var files_deleted: Array = split["deleted"]
+	var receipt_state := String(edit_result.get("edit_receipt_state", ""))
+
+	var errors: Array = []
+	var warnings: Array = []
+	var status := "applied" if succeeded else "failed"
+	if not succeeded:
+		errors.append({
+			"code": "TURN_FAILED",
+			"path": null,
+			"message": String(edit_result.get("error", "unknown error")),
+		})
+	if succeeded and receipt_state == "ERROR":
+		warnings.append(
+			"Edit receipt could not be fully backed up; Revert is unavailable for this edit."
+		)
+
+	# validation_result vs runtime_result — deliberately NOT the same
+	# thing. validation_result is real, mechanical, disk-level proof
+	# (see run_coordination_validation()). runtime_result stays honestly
+	# {"status": "not_checked"} until an actual write -> load-from-disk
+	# -> restart-composed-runtime -> health-check pipeline exists; calling
+	# a disk-level check a "runtime result" would be a false claim about
+	# something never actually observed running.
+	var validation_result := {"status": "not_checked", "checks": []}
+	if succeeded:
+		validation_result = run_coordination_validation(
+			project_root(), files_created + files_modified
+		)
+		if String(validation_result.get("status", "")) == "failed":
+			for check in validation_result.get("checks", []):
+				if String(check.get("status", "")) != "passed":
+					errors.append({
+						"code": "VALIDATION_FAILED",
+						"path": check.get("path", ""),
+						"message": String(check.get("error", "headless validation failed")),
+					})
+
+	var execution_summary := ""
+	if succeeded:
+		execution_summary = "Created %d file(s), modified %d file(s), deleted %d file(s)." % [
+			files_created.size(), files_modified.size(), files_deleted.size(),
+		]
+	else:
+		execution_summary = "Edit turn failed: %s" % String(edit_result.get("error", "unknown error"))
+
+	var body := execution_summary
+	if not warnings.is_empty():
+		body += " (%d warning(s))" % warnings.size()
+	if not errors.is_empty() and succeeded:
+		body += " (%d error(s) found during validation)" % errors.size()
+
+	var report := {
+		"schema": EDITOR_REPORT_SCHEMA_ID,
+		"message_id": message_id,
+		"parent_message_id": String(dragon_request.get("message_id", "")),
+		"source": "editor",
+		"destination": "dragon3d",
+		"kind": "edit_report",
+		"created_at": Time.get_unix_time_from_system(),
+		"edit_id": String(edit_result.get("edit_id", "")),
+		"edit_receipt_state": receipt_state,
+		"status": status,
+		"files_created": files_created,
+		"files_modified": files_modified,
+		"files_deleted": files_deleted,
+		"execution_summary": execution_summary,
+		"errors": errors,
+		"warnings": warnings,
+		"validation_result": validation_result,
+		"runtime_result": {"status": "not_checked"},
+		"body": body,
+	}
+	var dest_path := COORDINATION_INBOX_DIR.path_join(
+		"editor_report.%s.attempt0.json" % message_id
+	)
+	var tmp_path := dest_path + ".writing"
+	var writer := FileAccess.open(tmp_path, FileAccess.WRITE)
+	if writer == null:
+		return FileAccess.get_open_error()
+	writer.store_string(JSON.stringify(report, "  "))
+	writer.close()
+	return DirAccess.rename_absolute(tmp_path, dest_path)

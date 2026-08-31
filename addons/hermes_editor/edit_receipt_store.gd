@@ -58,7 +58,7 @@ extends RefCounted
 ## recorded in the receipt now so a future retention policy can be
 ## added without changing the receipt's own shape.
 
-const _EXCLUDED_DIR_NAMES := [".git", ".hermes_scratch"]  # duplicated from hermes_bridge.gd's own SCRATCH_DIR_NAME/exclusion list on purpose — this file intentionally has no dependency on that one's private consts; keep the two lists in sync if either ever changes.
+const _EXCLUDED_DIR_NAMES := [".git", ".godot", ".hermes_scratch"]  # duplicated from hermes_bridge.gd's own SCRATCH_DIR_NAME/_FINGERPRINT_EXCLUDED_DIR_NAMES on purpose — this file intentionally has no dependency on that one's private consts; keep the two lists in sync if either ever changes. .godot excluded because it's Godot's own editor-maintained cache (filesystem_cache*, uid cache, etc.), rewritten by the editor's own scan/reimport machinery independent of anything Hermes or the user did — see hermes_bridge.gd's own _capture_tree_fingerprint() doc for the real receipt that exposed this.
 const _SCRATCH_PREFIX := ".hermes_scratch/"
 const _TMP_SUFFIX := ".hermes_revert_tmp"
 const _ROLLBACK_SUFFIX := ".hermes_revert_rollback"
