@@ -35,6 +35,13 @@ var _pending_dragon_request_path: String = ""
 var _dragon_poll_accumulator_sec: float = 0.0
 const _DRAGON_POLL_INTERVAL_SEC := 1.0
 
+# Additional recipient (Phase 0, human-relayed) — see hermes_bridge.gd's
+# format_report_for_chatgpt_dragon() doc. Holds the most recent formatted
+# block so the copy button always copies exactly what was last appended
+# to the transcript, without re-deriving it from the (already-filed) report.
+var _last_chatgpt_dragon_report: String = ""
+var _copy_chatgpt_report_button: Button
+
 
 func _ready() -> void:
 	_dock_trace("_ready: begin")
@@ -200,6 +207,17 @@ func _build_ui() -> void:
 	_dragon_requests_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	dragon_requests_scroll.add_child(_dragon_requests_list)
 
+	# Additional recipient (Phase 0, human-relayed) — see hermes_bridge.gd's
+	# format_report_for_chatgpt_dragon() doc. Disabled until a coordinated
+	# edit has actually produced a report; copies to the OS clipboard so it
+	# can be pasted straight into the ChatGPT "avatar dragon" tab.
+	_copy_chatgpt_report_button = Button.new()
+	_copy_chatgpt_report_button.text = "Copy last report for ChatGPT Dragon"
+	_copy_chatgpt_report_button.disabled = true
+	_copy_chatgpt_report_button.tooltip_text = "Copies the most recent Editor->Dragon status block to the clipboard for pasting into the ChatGPT avatar-dragon conversation. No automated channel to that conversation exists yet — this is a manual handoff."
+	_copy_chatgpt_report_button.pressed.connect(_on_copy_chatgpt_report_pressed)
+	root.add_child(_copy_chatgpt_report_button)
+
 	var input_row := HBoxContainer.new()
 	input_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	root.add_child(input_row)
@@ -330,7 +348,12 @@ func _on_turn_finished(result: Dictionary) -> void:
 		var completed_path := _pending_dragon_request_path
 		_pending_dragon_request = {}
 		_pending_dragon_request_path = ""
-		var write_err := HermesBridgeScript.write_editor_report(completed_request, result)
+		# Built once, then written to the proven dragon3d<->Editor lane AND
+		# formatted for the separate ChatGPT relay below, so a real
+		# headless-validation spawn (inside build_editor_report()) never
+		# runs twice for one edit.
+		var report := HermesBridgeScript.build_editor_report(completed_request, result)
+		var write_err := HermesBridgeScript.write_report_dict(report)
 		if write_err != OK:
 			_append_transcript("⚠ Could not file the Editor report back to Dragon (error %d) — the edit itself is unaffected, but Dragon will not hear about it this turn." % write_err)
 		HermesBridgeScript.mark_dragon_request_handled(completed_path)
@@ -341,6 +364,14 @@ func _on_turn_finished(result: Dictionary) -> void:
 				row.queue_free()
 		_dragon_request_rows.erase(completed_path)
 		_append_transcript("[editor→dragon] report filed for: " + String(completed_request.get("body", "")))
+
+		# Additional recipient (Phase 0, human-relayed) — does not affect
+		# the dragon3d<->Editor lane above in any way. See
+		# format_report_for_chatgpt_dragon()'s own doc for why this is a
+		# copy-paste handoff rather than an automated push.
+		_last_chatgpt_dragon_report = HermesBridgeScript.format_report_for_chatgpt_dragon(report)
+		_append_transcript(_last_chatgpt_dragon_report)
+		_copy_chatgpt_report_button.disabled = false
 
 	if not result.get("success", false):
 		_append_transcript("[error] " + String(result.get("error", "unknown error")))
@@ -356,6 +387,13 @@ func _on_turn_finished(result: Dictionary) -> void:
 		_status_label.text = "DIRECT WRITE trial turn complete — " + base_status
 	else:
 		_status_label.text = base_status
+
+
+func _on_copy_chatgpt_report_pressed() -> void:
+	if _last_chatgpt_dragon_report.is_empty():
+		return
+	DisplayServer.clipboard_set(_last_chatgpt_dragon_report)
+	_status_label.text = "Copied last Editor report to clipboard for ChatGPT Dragon."
 
 
 func _append_transcript(line: String) -> void:

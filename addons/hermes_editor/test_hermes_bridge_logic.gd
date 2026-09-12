@@ -543,6 +543,42 @@ func _check_coordination_lane() -> void:
 		"written report carries its own generated message_id, distinct from the edit_id"
 	)
 
+	# Additional recipient (Phase 0, human-relayed ChatGPT Dragon handoff) —
+	# formatted from the SAME report this lane already wrote and verified
+	# above, not a second computation. See format_report_for_chatgpt_dragon()'s
+	# own doc.
+	var chatgpt_block := HermesBridgeScript.format_report_for_chatgpt_dragon(report_payload)
+	_assert(
+		chatgpt_block.begins_with("[EDITOR -> CHATGPT DRAGON STATUS]"),
+		"ChatGPT-relay block is clearly labeled at the top: got %s" % [chatgpt_block.substr(0, 40)]
+	)
+	_assert(
+		chatgpt_block.contains("event_id: %s" % String(report_payload.get("message_id", ""))),
+		"ChatGPT-relay block carries the exact same event_id as the filed report"
+	)
+	_assert(
+		chatgpt_block.contains("status: applied"),
+		"ChatGPT-relay block carries the exact same status as the filed report"
+	)
+	_assert(
+		chatgpt_block.contains("~ modified: res://scripts/DragonAvatar3D.gd")
+		and chatgpt_block.contains("~ modified: res://scenes/Main.tscn"),
+		"ChatGPT-relay block lists the exact same changed files as the filed report: got %s" % [chatgpt_block]
+	)
+	_assert(
+		chatgpt_block.contains("validation: passed") and chatgpt_block.contains("blockers: none"),
+		"ChatGPT-relay block carries the exact same validation/blocker facts as the filed report: got %s" % [chatgpt_block]
+	)
+
+	var failed_report := HermesBridgeScript.build_editor_report(
+		dragon_request, {"success": false, "error": "hermes exited 1: fake failure"}
+	)
+	var failed_block := HermesBridgeScript.format_report_for_chatgpt_dragon(failed_report)
+	_assert(
+		failed_block.contains("status: failed") and failed_block.contains("[TURN_FAILED] hermes exited 1: fake failure"),
+		"ChatGPT-relay block surfaces a failed turn's real error as a blocker, not silently: got %s" % [failed_block]
+	)
+
 	# Cleanup — leave the shared mailbox exactly as this test found it.
 	if FileAccess.file_exists(bad_path):
 		DirAccess.remove_absolute(bad_path)

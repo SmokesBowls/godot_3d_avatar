@@ -898,9 +898,14 @@ static func run_coordination_validation(current_project_root: String, changed_pa
 ## coordination lane" doc and EDITOR_REPORT_KEYS in
 ## hermes_session_adapter.py (which MUST be kept in exact sync with this
 ## shape — the adapter validates by exact key match).
-static func write_editor_report(dragon_request: Dictionary, edit_result: Dictionary) -> Error:
-	if not DirAccess.dir_exists_absolute(COORDINATION_INBOX_DIR):
-		DirAccess.make_dir_recursive_absolute(COORDINATION_INBOX_DIR)
+##
+## Split into build (pure) + write (I/O) so a second, additional consumer
+## of the exact same report (see format_report_for_chatgpt_dragon() below)
+## can be built from one computation — in particular so
+## run_coordination_validation()'s real headless Godot spawn never runs
+## twice for one edit. write_editor_report() itself is unchanged in
+## behavior/signature; existing callers and tests are unaffected.
+static func build_editor_report(dragon_request: Dictionary, edit_result: Dictionary) -> Dictionary:
 	var message_id := EditReceiptStore.generate_edit_id()
 	var succeeded: bool = edit_result.get("success", false)
 	var changes: PackedStringArray = edit_result.get("live_tree_changes", PackedStringArray())
@@ -980,8 +985,18 @@ static func write_editor_report(dragon_request: Dictionary, edit_result: Diction
 		"runtime_result": {"status": "not_checked"},
 		"body": body,
 	}
+	return report
+
+
+## Writes an already-built report (see build_editor_report()) into
+## COORDINATION_INBOX_DIR, named exactly the way
+## hermes_session_adapter.py's COORDINATION_REPORT_FILENAME_PATTERN
+## expects. Pure I/O — no report computation happens here.
+static func write_report_dict(report: Dictionary) -> Error:
+	if not DirAccess.dir_exists_absolute(COORDINATION_INBOX_DIR):
+		DirAccess.make_dir_recursive_absolute(COORDINATION_INBOX_DIR)
 	var dest_path := COORDINATION_INBOX_DIR.path_join(
-		"editor_report.%s.attempt0.json" % message_id
+		"editor_report.%s.attempt0.json" % String(report.get("message_id", ""))
 	)
 	var tmp_path := dest_path + ".writing"
 	var writer := FileAccess.open(tmp_path, FileAccess.WRITE)
@@ -990,3 +1005,73 @@ static func write_editor_report(dragon_request: Dictionary, edit_result: Diction
 	writer.store_string(JSON.stringify(report, "  "))
 	writer.close()
 	return DirAccess.rename_absolute(tmp_path, dest_path)
+
+
+## Unchanged external behavior/signature — existing callers (hermes_dock.gd
+## prior to the ChatGPT-relay addition, and every existing test) keep
+## working exactly as before. New callers that also want the ChatGPT-
+## relay text should call build_editor_report() once and pass the result
+## to both this and format_report_for_chatgpt_dragon(), instead of calling
+## this function, to avoid running run_coordination_validation()'s real
+## headless Godot spawn twice for one edit.
+static func write_editor_report(dragon_request: Dictionary, edit_result: Dictionary) -> Error:
+	return write_report_dict(build_editor_report(dragon_request, edit_result))
+
+
+## ADDITIONAL RECIPIENT (Phase 0, human-relayed) — the ChatGPT custom-GPT
+## "avatar dragon" persona in the browser is a SEPARATE brain from the
+## dragon3d/Hermes-CLI runtime Dragon this file's coordination lane above
+## talks to (confirmed: nothing in this project calls out to it, no
+## OpenAPI/Actions config or webhook receiver exists for it anywhere in
+## this project as of this writing). This function does not add, remove,
+## or reroute anything in that proven lane — it is a pure, read-only
+## formatter over the exact same report dict build_editor_report() already
+## produces, so a human can paste the result into that chat by hand, the
+## same way a command already reaches the Editor by hand today. Field
+## names mirror the vocabulary that chat's own persona proposed
+## (event_id/status/summary/changed_files/validation/blockers) wherever
+## this project already has a real fact behind that name; nothing is
+## invented for fields this project doesn't actually produce (no
+## "sequence"/"acknowledgments"/"replay_protection" — an Action/webhook
+## transport, if one is ever built, is future work, not this function's
+## job).
+static func format_report_for_chatgpt_dragon(report: Dictionary) -> String:
+	var lines: PackedStringArray = [
+		"[EDITOR -> CHATGPT DRAGON STATUS]",
+		"event_id: %s" % String(report.get("message_id", "")),
+		"in_reply_to: %s" % String(report.get("parent_message_id", "")),
+		"status: %s" % String(report.get("status", "")),
+		"summary: %s" % String(report.get("execution_summary", "")),
+	]
+	var created: Array = report.get("files_created", [])
+	var modified: Array = report.get("files_modified", [])
+	var deleted: Array = report.get("files_deleted", [])
+	if created.is_empty() and modified.is_empty() and deleted.is_empty():
+		lines.append("changed_files: none")
+	else:
+		lines.append("changed_files:")
+		for p in created:
+			lines.append("  + created: %s" % String(p))
+		for p in modified:
+			lines.append("  ~ modified: %s" % String(p))
+		for p in deleted:
+			lines.append("  - deleted: %s" % String(p))
+	var validation: Dictionary = report.get("validation_result", {})
+	lines.append("validation: %s" % String(validation.get("status", "not_checked")))
+	var runtime_result: Dictionary = report.get("runtime_result", {})
+	lines.append("runtime_result: %s" % String(runtime_result.get("status", "not_checked")))
+	var errors: Array = report.get("errors", [])
+	if errors.is_empty():
+		lines.append("blockers: none")
+	else:
+		lines.append("blockers:")
+		for e in errors:
+			if typeof(e) == TYPE_DICTIONARY:
+				lines.append("  - [%s] %s" % [String(e.get("code", "")), String(e.get("message", ""))])
+	var warnings: Array = report.get("warnings", [])
+	if not warnings.is_empty():
+		lines.append("warnings:")
+		for w in warnings:
+			lines.append("  - %s" % String(w))
+	lines.append("edit_id: %s" % String(report.get("edit_id", "")))
+	return "\n".join(lines)
