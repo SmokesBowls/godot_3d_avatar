@@ -434,8 +434,13 @@ def test_pending_coordination_report_publishes_tool_and_dragon_events(
 
     events = _read_tool_events(adapter.config)
     assert [e["kind"] for e in events] == ["tool", "dragon"]
-    assert events[0]["text"].startswith("Proposal complete")
-    assert "Modified 1 file(s)." in events[0]["text"]  # _write_editor_report()'s own execution_summary
+    # Real report fields, not a canned "Proposal complete" string (see
+    # _format_tool_completion_text()'s own doc) — the request's real
+    # identity, the real changed file's real basename, and the real
+    # validation status, all pulled from _write_editor_report()'s fixture.
+    assert events[0]["text"] == (
+        "Request dragonreq_test: DONE — DragonAvatar3D.gd updated; validation not_checked"
+    )
     assert events[1]["text"] == "The tower now stands ready."
 
 
@@ -461,4 +466,11 @@ def test_pending_coordination_report_publishes_only_tool_event_on_dispatch_failu
 
     events = _read_tool_events(adapter.config)
     assert [e["kind"] for e in events] == ["tool"]
-    assert events[0]["text"].startswith("Proposal complete")
+    # The report's own status is still "applied" (the Editor genuinely
+    # finished the edit) even though DISPATCHING it to Dragon failed —
+    # _format_tool_completion_text() reflects the report's real status,
+    # not the delivery outcome, so this is the same DONE text as the
+    # success test, correctly.
+    assert events[0]["text"] == (
+        "Request dragonreq_test: DONE — DragonAvatar3D.gd updated; validation not_checked"
+    )

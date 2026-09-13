@@ -883,6 +883,43 @@ def test_coordination_report_success_moves_to_consumed_unchanged(tmp_path: Path)
     assert consumed_path.read_bytes() == original_bytes  # payload never mutated, only relocated
 
 
+def test_format_tool_completion_text_reflects_real_success_fields() -> None:
+    """Corrected 2026-09-13: the [TOOL] line must be built from the real
+    report, never a canned "Proposal complete" string."""
+    module = _adapter_module()
+    report = {
+        "parent_message_id": "dragonreq_tower_02",
+        "status": "applied",
+        "files_created": [],
+        "files_modified": ["res://scenes/Main.tscn", "res://scenes/FirstLightTower.tscn"],
+        "files_deleted": [],
+        "validation_result": {"status": "passed", "checks": []},
+    }
+    text = module._format_tool_completion_text(report)
+    assert text == (
+        "Request dragonreq_tower_02: DONE — Main.tscn, FirstLightTower.tscn updated; "
+        "validation passed"
+    )
+
+
+def test_format_tool_completion_text_reflects_real_failure_fields() -> None:
+    module = _adapter_module()
+    report = {
+        "parent_message_id": "dragonreq_tower_03",
+        "status": "failed",
+        "files_created": [],
+        "files_modified": [],
+        "files_deleted": [],
+        "validation_result": {"status": "not_checked", "checks": []},
+        "errors": [{"code": "TURN_FAILED", "path": None, "message": "hermes exited 1"}],
+    }
+    text = module._format_tool_completion_text(report)
+    assert text == (
+        "Request dragonreq_tower_03: FAILED — no files changed; "
+        "validation not_checked (hermes exited 1)"
+    )
+
+
 def test_format_messages_includes_labeled_coordination_report_when_pending(tmp_path: Path) -> None:
     adapter = _adapter(tmp_path)
     report = {

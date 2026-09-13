@@ -151,6 +151,50 @@ EDITOR_DIRECTIVE_PATTERN = re.compile(
     r"\[EDITOR_REQUEST\]\s*(?P<body>.*?)\s*\[/EDITOR_REQUEST\]", re.DOTALL
 )
 DIRECTIVE_ONLY_ACKNOWLEDGEMENT = "Editor request sent."
+
+
+def _format_tool_completion_text(coordination_report: dict[str, Any]) -> str:
+    """Builds the [TOOL] event's actual text from the real report fields
+    — corrected 2026-09-13 after live-test review: a canned "Proposal
+    complete"/"Proposal failed" string is exactly the generic status
+    language this project's own honesty conventions elsewhere already
+    reject ("if the bridge fails, I say where" — say what happened, not
+    a templated label). Uses parent_message_id as the request's
+    identifier: the original dragon_request this report answers is not
+    available at either of this function's call sites (only its id is),
+    so this does not attempt to recover a human-chosen label Dragon may
+    have put in that request's own free-text body — that would require
+    an extra, fallible file read this function has no access to, for a
+    convention Dragon might not even follow consistently. The message_id
+    it does have is always present and exact, which matters more here
+    than being pretty."""
+    request_label = str(coordination_report.get("parent_message_id") or "unknown request")
+    status = coordination_report.get("status", "unknown")
+    outcome = "DONE" if status == "applied" else "FAILED"
+    changed_paths = (
+        list(coordination_report.get("files_created") or [])
+        + list(coordination_report.get("files_modified") or [])
+        + list(coordination_report.get("files_deleted") or [])
+    )
+    if changed_paths:
+        names = ", ".join(Path(str(p)).name for p in changed_paths)
+        files_part = f"{names} updated" if status == "applied" else f"{names} affected"
+    else:
+        files_part = "no files changed"
+    validation_result = coordination_report.get("validation_result")
+    validation_status = (
+        validation_result.get("status", "not_checked")
+        if isinstance(validation_result, dict)
+        else "not_checked"
+    )
+    text = f"Request {request_label}: {outcome} — {files_part}; validation {validation_status}"
+    if status != "applied":
+        errors = coordination_report.get("errors")
+        if isinstance(errors, list) and errors:
+            first_error = errors[0]
+            if isinstance(first_error, dict) and first_error.get("message"):
+                text += f" ({first_error['message']})"
+    return text
 RESPONSE_SCHEMA = "engain.hermes_mailbox_response.v1"
 PERCEPTION_SCHEMA = "engain.runtime_perception.v1"
 SNAPSHOT_SCHEMA = "engain.runtime_snapshot.v1"
@@ -1789,13 +1833,10 @@ class HermesSessionAdapter:
         # The Editor's own work is already done and already a fact by
         # this point, regardless of whether the dispatch below succeeds —
         # so the "tool" line is published unconditionally here, before
-        # attempting delivery, not gated on delivered succeeding.
-        report_status = coordination_report.get("status", "unknown")
-        report_summary = coordination_report.get("execution_summary") or coordination_report.get("body", "")
-        if report_status == "applied":
-            self._publish_tool_event("tool", f"Proposal complete — {report_summary}")
-        else:
-            self._publish_tool_event("tool", f"Proposal failed — {report_summary}")
+        # attempting delivery, not gated on delivered succeeding. See
+        # _format_tool_completion_text()'s own doc for why this is built
+        # from the report's real fields, not a canned string.
+        self._publish_tool_event("tool", _format_tool_completion_text(coordination_report))
 
         delivered = False
         try:
@@ -2441,15 +2482,9 @@ class HermesSessionAdapter:
                 # method — NOT gated on report_delivered (whether THIS
                 # player turn's own dispatch happened to succeed): the
                 # Editor's work is already a completed fact regardless.
-                report_status = coordination_report.get("status", "unknown")
-                report_summary = (
-                    coordination_report.get("execution_summary")
-                    or coordination_report.get("body", "")
-                )
-                if report_status == "applied":
-                    self._publish_tool_event("tool", f"Proposal complete — {report_summary}")
-                else:
-                    self._publish_tool_event("tool", f"Proposal failed — {report_summary}")
+                # See _format_tool_completion_text()'s own doc for why
+                # this is built from the report's real fields.
+                self._publish_tool_event("tool", _format_tool_completion_text(coordination_report))
             self._dispose_coordination_report(
                 claimed_coord_path,
                 coord_basename,
