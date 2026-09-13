@@ -2421,6 +2421,21 @@ class HermesSessionAdapter:
                     validated.player_input, coordination_report=coordination_report
                 )
                 safe_response = self._engain_continuity_response(engain_result, validated)
+                # 2026-09-13 fix: this call was missing here going all the
+                # way back to continuity dispatch's original introduction
+                # (2026-08-17) — confirmed via git history, predates every
+                # change made this session. Without it, an [EDITOR_REQUEST]
+                # block in Dragon's own continuity-routed reply was shown
+                # to the player verbatim (never stripped) and never
+                # published to the coordination outbox at all — the
+                # forward Dragon->Editor leg was silently dead under
+                # ENGAIN_CONTINUITY_DISPATCH=1 specifically, caught by a
+                # real live test (empty "Pending Dragon requests" panel
+                # despite a visible [EDITOR_REQUEST] in the transcript),
+                # not by test coverage. The local (non-continuity) branch
+                # below already did this correctly; this makes the two
+                # paths consistent.
+                safe_response = self._extract_editor_directive(safe_response)
                 dragon_turn_succeeded = True
             else:
                 self.client.pending_coordination = coordination_report

@@ -285,6 +285,64 @@ def test_process_claimed_request_uses_engain_continuity_when_enabled(
     assert "EngAIn shared continuity" in response["director_analysis"]
 
 
+def test_editor_request_in_continuity_response_reaches_the_coordination_outbox(
+    tmp_path, monkeypatch, fake_dispatch_server
+):
+    """The exact live-test failure from 2026-09-13: Dragon's continuity-
+    routed reply can contain a real [EDITOR_REQUEST] block, but
+    _extract_editor_directive() was never called on that branch (confirmed
+    via git history to predate this session's own changes) -- so it was
+    never published to the outbox and the Hermes Editor's "Pending Dragon
+    requests" list stayed empty even though the transcript visibly showed
+    a request. Proves the forward Dragon->Editor leg now works under
+    ENGAIN_CONTINUITY_DISPATCH=1, not just the local/non-continuity path
+    that already worked."""
+    base_url, handler = fake_dispatch_server
+    handler.response_builder = staticmethod(
+        lambda body: (200, {
+            "session_id": body.get("shared_session_id"),
+            "origin_body": body.get("origin_body"),
+            "actor": body.get("provider_id"),
+            "response": (
+                "Authorization received.\n\n"
+                "[EDITOR_REQUEST]\n"
+                "Request ID: return_landing_sigil_01. Create a landing sigil.\n"
+                "[/EDITOR_REQUEST]"
+            ),
+            "turn_id": 3,
+        })
+    )
+    monkeypatch.setenv(COMPAT_ENV, "1")
+    monkeypatch.setenv("ENGAIN_CONTINUITY_DISPATCH", "1")
+    monkeypatch.setenv("ENGAIN_CONTINUITY_SHARED_SESSION_ID", "shared-forward-leg-test")
+    adapter, director = _prepared_adapter(tmp_path)
+    adapter.prepare()
+    payload = _build_request(tmp_path)
+    _retime_request(tmp_path, payload)
+    adapter.config.request_file.write_bytes(json.dumps(payload).encode())
+
+    completed = adapter.process_once()
+    assert completed is True
+
+    # 1. Published to the real outbox as a real engain.dragon_request.v1 —
+    #    same discovery mechanism hermes_dock.gd's list_pending_dragon_
+    #    requests() already uses (see test_hermes_bridge_logic.gd's own
+    #    coordination-lane check for the Godot side of this contract).
+    outbox_files = list(adapter.config.coordination_outbox_dir.glob("*.json"))
+    assert len(outbox_files) == 1
+    published = json.loads(outbox_files[0].read_text())
+    assert published["schema"] == "engain.dragon_request.v1"
+    assert "Request ID: return_landing_sigil_01" in published["body"]
+    assert published["source"] == "dragon3d"
+    assert published["destination"] == "editor"
+
+    # 2. The player-facing reply has the transport block stripped, exactly
+    #    like the local/non-continuity path already did.
+    response = json.loads(adapter.config.response_file.read_text())
+    assert "[EDITOR_REQUEST]" not in response["narrative_response"]
+    assert response["narrative_response"].strip() == "Authorization received."
+
+
 def test_pending_coordination_report_reaches_dispatch_and_is_marked_consumed(
     tmp_path, monkeypatch, fake_dispatch_server
 ):
