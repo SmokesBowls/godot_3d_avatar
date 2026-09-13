@@ -155,7 +155,7 @@ DIRECTIVE_ONLY_ACKNOWLEDGEMENT = "Editor request sent."
 
 def _format_tool_completion_text(coordination_report: dict[str, Any]) -> str:
     """Builds the [TOOL] event's actual text from the real report fields
-    — corrected 2026-09-13 after live-test review: a canned "Proposal
+    — corrected 2026-09-12 after live-test review: a canned "Proposal
     complete"/"Proposal failed" string is exactly the generic status
     language this project's own honesty conventions elsewhere already
     reject ("if the bridge fails, I say where" — say what happened, not
@@ -1784,7 +1784,7 @@ class HermesSessionAdapter:
           claim a new player request while response_file exists —
           writing one here would wedge every subsequent real player turn
           behind a file nothing would ever correlate to and claim.
-          Resolved (2026-09-13, was previously a stated limitation): the
+          Resolved (2026-09-12, was previously a stated limitation): the
           Editor's completion and Dragon's reaction are instead published
           to _publish_tool_event() as "tool"/"dragon" lines — a separate,
           display-only channel EngAInBridge3D.gd polls independently of

@@ -406,7 +406,7 @@ def _read_tool_events(config) -> list:
 def test_pending_coordination_report_publishes_tool_and_dragon_events(
     tmp_path, monkeypatch, fake_dispatch_server
 ):
-    """The 2026-09-13 ask: Editor completion must show as [TOOL] in the
+    """The 2026-09-12 ask: Editor completion must show as [TOOL] in the
     live transcript, and Dragon's reaction to it must show as [DRAGON] --
     both via the separate, display-only tool_events channel, since this
     path writes no response.json at all (see

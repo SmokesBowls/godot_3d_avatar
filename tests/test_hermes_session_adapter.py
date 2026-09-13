@@ -884,7 +884,7 @@ def test_coordination_report_success_moves_to_consumed_unchanged(tmp_path: Path)
 
 
 def test_format_tool_completion_text_reflects_real_success_fields() -> None:
-    """Corrected 2026-09-13: the [TOOL] line must be built from the real
+    """Corrected 2026-09-12: the [TOOL] line must be built from the real
     report, never a canned "Proposal complete" string."""
     module = _adapter_module()
     report = {
