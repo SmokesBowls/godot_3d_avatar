@@ -27,7 +27,21 @@ const FROZEN_SESSION_ID := "20260731_065008_63a62d"
 const FROZEN_COMPANION := "hermes_b"
 const FROZEN_PROVIDER := "openai-codex"
 const FROZEN_MODEL := "gpt-5.6-sol"
-const WAIT_TIMEOUT_SEC := 180.0
+# 2026-09-13 correction: this used to be an independent hardcoded 180.0
+# — the game's own outermost watchdog on a player turn, numerically
+# EQUAL to hermes_session_adapter.py's own local-path Hermes timeout
+# (MAX_HERMES_TIMEOUT_SECONDS = 180.0) and, after that day's earlier fix
+# widened the continuity-dispatch path's inner budgets to 240s/255s,
+# suddenly SHORTER than a real, legitimate in-flight continuity turn —
+# live-caught as "Mailbox timeout after 180.0 seconds." immediately
+# followed by "stale response claimed and discarded; no active
+# lifecycle." once the real response.json finally arrived after this
+# watchdog had already cleared the lifecycle. Same "outer must exceed
+# inner" rule as that fix, one layer further out — see
+# _compute_wait_timeout_sec()'s own doc. Not a const any more:
+# OS.get_environment() isn't a compile-time-foldable expression, so this
+# is resolved once in _ready(), before any player submission can occur.
+var WAIT_TIMEOUT_SEC: float = 180.0
 const CALL_LIFETIME_SEC := 185.0
 const POLL_INTERVAL_SEC := 0.1
 const MAILBOX_BUSY := "MAILBOX_BUSY"
@@ -168,9 +182,43 @@ var _capture_producer: Node = null
 
 
 func _ready() -> void:
+	WAIT_TIMEOUT_SEC = _compute_wait_timeout_sec()
 	_capture_producer = PerceptionCapture.new()
 	add_child(_capture_producer)
 	_emit_sys("Mailbox bridge ready. session_id=%s" % FROZEN_SESSION_ID)
+
+
+## Derives the outermost mailbox/lifecycle watchdog from the SAME
+## authoritative timeouts the underlying dispatch chain already uses,
+## rather than an independent literal. This process is normally launched
+## as a sibling of the Python worker from the same shell
+## (launch_dragon3d.sh), so the same env vars it reads are visible here
+## too (OS.get_environment() is already used elsewhere in this codebase
+## — see addons/hermes_editor/hermes_bridge.gd's own HOME lookup).
+##
+## Must be at least as large as whichever underlying budget a real
+## player turn might actually be waiting on, plus margin — the local
+## (non-continuity) path bottoms out at hermes_session_adapter.py's own
+## MAX_HERMES_TIMEOUT_SECONDS (env ENGAIN_HERMES_TIMEOUT, default 180.0);
+## the continuity-dispatch path bottoms out at engain_continuity_client
+## .py's own client timeout (env ENGAIN_CONTINUITY_PROVIDER_TIMEOUT_S +
+## ENGAIN_CONTINUITY_TIMEOUT_MARGIN_S, default 240.0+15.0=255.0). Takes
+## whichever is larger — correct regardless of which mode is actually
+## configured, without this script needing to know which one — then adds
+## the SAME 15.0 margin already established for this exact chain rather
+## than inventing a new number.
+static func _compute_wait_timeout_sec() -> float:
+	var local_timeout := 180.0
+	if OS.has_environment("ENGAIN_HERMES_TIMEOUT"):
+		local_timeout = float(OS.get_environment("ENGAIN_HERMES_TIMEOUT"))
+	var provider_timeout := 240.0
+	if OS.has_environment("ENGAIN_CONTINUITY_PROVIDER_TIMEOUT_S"):
+		provider_timeout = float(OS.get_environment("ENGAIN_CONTINUITY_PROVIDER_TIMEOUT_S"))
+	var timeout_margin := 15.0
+	if OS.has_environment("ENGAIN_CONTINUITY_TIMEOUT_MARGIN_S"):
+		timeout_margin = float(OS.get_environment("ENGAIN_CONTINUITY_TIMEOUT_MARGIN_S"))
+	var continuity_client_timeout := provider_timeout + timeout_margin
+	return max(local_timeout, continuity_client_timeout) + timeout_margin
 
 
 func _exit_tree() -> void:
