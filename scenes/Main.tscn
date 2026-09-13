@@ -24,10 +24,10 @@ transform = Transform3D(1, 0, 0, 0, 0.965926, 0.258819, 0, -0.258819, 0.965926, 
 mesh = SubResource("PlaneMesh_ground")
 
 [node name="DragonAvatar3D" parent="World" unique_id=1183454696 instance=ExtResource("1_dragon")]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.693476, 1.2950282, -1.3300718)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2.193476, 1.2099472, -1.3300718)
 
-[node name="FirstLightTower" parent="World" instance=ExtResource("4_tower")]
-position = Vector3(-7.5, 0, -8.25)
+[node name="FirstLightTower" parent="World" unique_id=1333278874 instance=ExtResource("4_tower")]
+transform = Transform3D(0.65, 0, 0, 0, 0.65, 0, 0, 0, 0.65, -8.5, 0, -8.6)
 
 [node name="UI" type="CanvasLayer" parent="." unique_id=636635132]
 
@@ -41,11 +41,10 @@ offset_left = 22.0
 offset_top = -108.0
 offset_right = 148.0
 offset_bottom = -36.0
-grow_horizontal = 1
 grow_vertical = 0
 text = "VIOLET-7319"
 
-[node name="BeaconGate" type="Control" parent="UI"]
+[node name="BeaconGate" type="Control" parent="UI" unique_id=969100492]
 layout_mode = 3
 anchors_preset = 2
 anchor_top = 1.0
@@ -54,18 +53,17 @@ offset_left = 6.0
 offset_top = -125.0
 offset_right = 164.0
 offset_bottom = -20.0
-grow_horizontal = 1
 grow_vertical = 0
 mouse_filter = 2
 
-[node name="TopBeam" type="ColorRect" parent="UI/BeaconGate"]
+[node name="TopBeam" type="ColorRect" parent="UI/BeaconGate" unique_id=2008504178]
 layout_mode = 0
 offset_right = 158.0
 offset_bottom = 4.0
 mouse_filter = 2
 color = Color(0.117647, 0.352941, 1, 0.82)
 
-[node name="BottomBeam" type="ColorRect" parent="UI/BeaconGate"]
+[node name="BottomBeam" type="ColorRect" parent="UI/BeaconGate" unique_id=1414367180]
 layout_mode = 0
 offset_top = 101.0
 offset_right = 158.0
@@ -73,14 +71,14 @@ offset_bottom = 105.0
 mouse_filter = 2
 color = Color(0.117647, 0.352941, 1, 0.82)
 
-[node name="LeftPillar" type="ColorRect" parent="UI/BeaconGate"]
+[node name="LeftPillar" type="ColorRect" parent="UI/BeaconGate" unique_id=30613112]
 layout_mode = 0
 offset_right = 4.0
 offset_bottom = 105.0
 mouse_filter = 2
 color = Color(0.117647, 0.352941, 1, 0.82)
 
-[node name="RightPillar" type="ColorRect" parent="UI/BeaconGate"]
+[node name="RightPillar" type="ColorRect" parent="UI/BeaconGate" unique_id=327307272]
 layout_mode = 0
 offset_left = 154.0
 offset_right = 158.0
@@ -88,14 +86,14 @@ offset_bottom = 105.0
 mouse_filter = 2
 color = Color(0.117647, 0.352941, 1, 0.82)
 
-[node name="TopLeftBeacon" type="ColorRect" parent="UI/BeaconGate"]
+[node name="TopLeftBeacon" type="ColorRect" parent="UI/BeaconGate" unique_id=1498871881]
 layout_mode = 0
 offset_right = 12.0
 offset_bottom = 12.0
 mouse_filter = 2
 color = Color(0.266667, 0.917647, 1, 1)
 
-[node name="TopRightBeacon" type="ColorRect" parent="UI/BeaconGate"]
+[node name="TopRightBeacon" type="ColorRect" parent="UI/BeaconGate" unique_id=1516460548]
 layout_mode = 0
 offset_left = 146.0
 offset_right = 158.0
@@ -103,7 +101,7 @@ offset_bottom = 12.0
 mouse_filter = 2
 color = Color(0.266667, 0.917647, 1, 1)
 
-[node name="BottomLeftBeacon" type="ColorRect" parent="UI/BeaconGate"]
+[node name="BottomLeftBeacon" type="ColorRect" parent="UI/BeaconGate" unique_id=1946761056]
 layout_mode = 0
 offset_top = 93.0
 offset_right = 12.0
@@ -111,7 +109,7 @@ offset_bottom = 105.0
 mouse_filter = 2
 color = Color(0.266667, 0.917647, 1, 1)
 
-[node name="BottomRightBeacon" type="ColorRect" parent="UI/BeaconGate"]
+[node name="BottomRightBeacon" type="ColorRect" parent="UI/BeaconGate" unique_id=421665041]
 layout_mode = 0
 offset_left = 146.0
 offset_top = 93.0
