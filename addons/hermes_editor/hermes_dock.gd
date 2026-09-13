@@ -320,6 +320,7 @@ func _on_turn_finished(result: Dictionary) -> void:
 			audit += "    " + String(change) + "\n"
 		audit += "  Review this list against the exact request before restarting the runtime."
 		_append_transcript(audit)
+		_experimental_reload_edited_scene_via_api()
 	elif safety_violation:
 		var warning := "⚠ SAFETY VIOLATION — live project file(s) changed outside .hermes_scratch/ this turn:\n"
 		for v in changes:
@@ -399,6 +400,43 @@ func _on_copy_chatgpt_report_pressed() -> void:
 func _append_transcript(line: String) -> void:
 	_transcript.text += line + "\n\n"
 	_transcript.set_caret_line(_transcript.get_line_count())
+
+
+## EXPERIMENTAL, BOUNDED PROOF ONLY (2026-09-13) — see _lifecycle_probe.gd's
+## own doc and that day's design note/receipt on the composed-editor
+## SIGSEGV/SIGABRT-on-external-reload investigation. NOT the adopted fix.
+##
+## Question this answers, nothing broader: does calling
+## EditorInterface.reload_scene_from_path() ourselves, immediately after a
+## successful DIRECT_WRITE, safely bring the already-open Main.tscn
+## current WITHOUT going through the crash-correlated path (Godot's own
+## async EditorFileSystem external-change detection -> the human-facing
+## "Reload from disk" dialog -> the human accepting it)? The prior trace
+## (hermes_lifecycle_trace.log) proved the plugin is idle in the ~2.5
+## minutes before that dialog-triggered abort and that the last signal
+## before it is EditorFileSystem.sources_changed — it did NOT prove that
+## THIS API call reaches different, safer engine code than the dialog's
+## own "Reload from disk" button does. That is exactly what this
+## instrumented call is for. Traced immediately before and after so a
+## crash exactly at this call, vs. surviving it, is unambiguous either
+## way — if the trace log's last line is "...about to call..." with no
+## matching "...returned normally" after a fresh crash, the API call
+## itself is where it died, same as the human button; if "...returned
+## normally" appears, this survived a case the manual dialog does not.
+##
+## Deliberately narrow: only Main.tscn (this exact investigation's own
+## scene), only after a real DIRECT_WRITE change, no toggle/config added,
+## does not touch runtime auto-reload, continuity, timeouts, authority,
+## or the lost-HUD-text issue. Whether to keep, remove, or generalize
+## this depends entirely on what the next real DIRECT_WRITE turn's trace
+## shows — not decided by this comment.
+func _experimental_reload_edited_scene_via_api() -> void:
+	if editor_interface == null:
+		LifecycleProbe.trace("experimental_reload: editor_interface is null, skipping")
+		return
+	LifecycleProbe.trace("experimental_reload: about to call reload_scene_from_path(res://scenes/Main.tscn)")
+	editor_interface.reload_scene_from_path("res://scenes/Main.tscn")
+	LifecycleProbe.trace("experimental_reload: reload_scene_from_path returned normally")
 
 
 ## One row per DIRECT_WRITE turn that actually touched the live tree.
