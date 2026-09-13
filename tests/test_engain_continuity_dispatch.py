@@ -224,7 +224,7 @@ def test_dispatch_via_engain_continuity_requires_shared_session_id(tmp_path, mon
     adapter, _director = _prepared_adapter(tmp_path)
     validated = adapter._validate_request(_build_request(tmp_path), validation_time=CAPTURED_AT + 1.0)
     with pytest.raises(HermesAdapterError, match="ENGAIN_CONTINUITY_SHARED_SESSION_ID"):
-        adapter._dispatch_via_engain_continuity(validated)
+        adapter._dispatch_via_engain_continuity(validated.player_input)
 
 
 def test_engain_continuity_response_shape(tmp_path):
@@ -319,3 +319,75 @@ def test_pending_coordination_report_reaches_dispatch_and_is_marked_consumed(
     assert not report_path.exists()
     consumed_path = adapter.config.coordination_consumed_dir / report_path.name
     assert consumed_path.exists()
+
+
+def test_pending_coordination_report_dispatches_without_a_player_turn(
+    tmp_path, monkeypatch, fake_dispatch_server
+):
+    """The exact gap the 2026-09-12 receipt named, now closed: Editor
+    completion (a report landing in the coordination inbox) must not
+    have to wait for a player to type something. Given a pending report
+    and NO player request file at all, one process_once() poll — exactly
+    what run()'s own `while True: process_once(); sleep(poll_seconds)`
+    calls on a timer — dispatches it on its own."""
+    base_url, handler = fake_dispatch_server
+    monkeypatch.setenv(COMPAT_ENV, "1")
+    monkeypatch.setenv("ENGAIN_CONTINUITY_DISPATCH", "1")
+    monkeypatch.setenv("ENGAIN_CONTINUITY_SHARED_SESSION_ID", "shared-spontaneous-test")
+    adapter, director = _prepared_adapter(tmp_path)
+    report_path = _write_editor_report(adapter.config, message_id="MSG_SPONTANEOUS_1")
+    adapter.prepare()
+    # Deliberately NOT writing a request file -- no player turn exists.
+
+    completed = adapter.process_once()
+
+    assert completed is True
+    assert director.calls == 0
+    assert len(handler.received) == 1
+    sent = handler.received[0]
+    assert sent["player_input"] == ""
+    assert sent["coordination_report"]["message_id"] == "MSG_SPONTANEOUS_1"
+    assert sent["coordination_report"]["status"] == "applied"
+    assert not adapter.config.response_file.exists()  # nothing in-game is left waiting
+
+    assert not report_path.exists()
+    consumed_path = adapter.config.coordination_consumed_dir / report_path.name
+    assert consumed_path.exists()
+
+
+def test_pending_coordination_report_stays_retryable_on_dispatch_failure(
+    tmp_path, monkeypatch, fake_dispatch_server
+):
+    """Failure must not be silently dropped, and the SAME poll must not
+    double-send: exactly one HTTP attempt per poll, and the report goes
+    back to inbox/ at attempt+1 -- the same failure handling the
+    player-turn path already has. A second poll then proves it is
+    genuinely retryable, not stuck."""
+    base_url, handler = fake_dispatch_server
+    handler.response_builder = staticmethod(
+        lambda body: (502, {"error": "PROVIDER_DISPATCH_FAILED"})
+    )
+    monkeypatch.setenv(COMPAT_ENV, "1")
+    monkeypatch.setenv("ENGAIN_CONTINUITY_DISPATCH", "1")
+    monkeypatch.setenv("ENGAIN_CONTINUITY_SHARED_SESSION_ID", "shared-spontaneous-fail-test")
+    adapter, director = _prepared_adapter(tmp_path)
+    report_path = _write_editor_report(adapter.config, message_id="MSG_SPONTANEOUS_FAIL")
+    adapter.prepare()
+
+    completed = adapter.process_once()
+
+    assert completed is True
+    assert len(handler.received) == 1  # exactly one attempt -- not double-sent
+    assert not report_path.exists()  # moved, not left in place
+    retried_path = (
+        adapter.config.coordination_inbox_dir / "editor_report.MSG_SPONTANEOUS_FAIL.attempt1.json"
+    )
+    assert retried_path.exists()  # back in inbox/, retryable, attempt incremented
+    assert not (adapter.config.coordination_consumed_dir / report_path.name).exists()
+
+    handler.response_builder = staticmethod(_default_builder)
+    completed_again = adapter.process_once()
+    assert completed_again is True
+    assert len(handler.received) == 2
+    assert not retried_path.exists()
+    assert (adapter.config.coordination_consumed_dir / retried_path.name).exists()

@@ -1662,7 +1662,11 @@ class HermesSessionAdapter:
             return False
         claimed_path = self._claim_request_file()
         if claimed_path is None:
-            return False
+            # No player request pending right now. A pending Editor
+            # coordination report must not have to wait for one — see
+            # _process_pending_coordination_report_without_player_turn()'s
+            # own doc.
+            return self._process_pending_coordination_report_without_player_turn()
         completed = False
         try:
             completed = self._process_claimed_request(claimed_path)
@@ -1672,6 +1676,123 @@ class HermesSessionAdapter:
                 claimed_path.unlink(missing_ok=True)
             else:
                 self._restore_claimed_request(claimed_path)
+
+    def _process_pending_coordination_report_without_player_turn(self) -> bool:
+        """The independent trigger: called once per process_once() poll
+        whenever no player request is currently pending, so the existing
+        poll loop (run(): while True: process_once();
+        sleep(poll_seconds)) itself becomes Editor-completion's delivery
+        mechanism — no new thread, no file-watcher, no second process.
+        Before this method existed, _claim_coordination_report() was only
+        ever reached as a side effect of a claimed player request (see the
+        2026-09-12 receipt) — a completed edit could sit in the inbox
+        indefinitely if nobody happened to send Dragon a message.
+
+        Deliberately narrow:
+        - Fires only when continuity dispatch is enabled. The local
+          (non-continuity) path's own coordination delivery already
+          happens inside a real player turn via pending_coordination /
+          _format_messages(); this method does not touch it, and does
+          not fire when continuity dispatch is off — a report simply
+          waits for the next player turn in that configuration, exactly
+          as before.
+        - Acquires the SAME presence-authority dispatch claim
+          (_acquire_dispatch_claim()/_release_dispatch_claim()) a real
+          player turn already takes before touching Hermes, and in the
+          SAME order relative to claiming the coordination report: the
+          claim is acquired FIRST, and the report is only claimed from
+          the inbox if that succeeds. If another worker instance already
+          holds this native session, or Presence itself is unreachable,
+          the report is never claimed at all — it costs no retry
+          attempt, and this simply tries again on the next poll.
+        - Claims via the SAME _claim_coordination_report()/
+          _dispose_coordination_report() atomic-rename pair the
+          player-turn path already uses, so the two paths can never both
+          claim the same report — whichever gets there first removes it
+          from the inbox before the other can see it.
+        - Dispatches with player_input="" — honestly reflecting that no
+          player said anything this turn; the coordination_report block
+          alone carries the real content (see ContinuityContextBuilder
+          .build() on the EngAIn side). handle_turn()'s own step 2 still
+          unconditionally appends a Ledger request-turn with
+          actor="player" for this empty input — a known, minor
+          imprecision in the Ledger's history for a turn no player
+          actually initiated. Left as-is: changing step 2's actor
+          semantics is an EngAIn-side Ledger question, out of scope for
+          this addition.
+        - Does NOT write config.response_file. Nothing in-game is
+          waiting for this turn's reply (no request_id/client_request_id
+          was ever issued for it), and process_once() itself refuses to
+          claim a new player request while response_file exists —
+          writing one here would wedge every subsequent real player turn
+          behind a file nothing would ever correlate to and claim. The
+          resulting narrative response is therefore absorbed into
+          EngAIn's own Ledger (visible to a future real turn's recap via
+          the missing-context path) but is not surfaced to the player
+          directly by this method — a deliberate, stated limitation, not
+          an oversight.
+
+        Returns True if a report was found (delivered, or read/dispatch
+        failed and was requeued/retired), False if there was nothing to
+        do (continuity dispatch off, inbox empty, or the dispatch claim
+        itself could not be acquired right now) — the same
+        true-means-did-something / false-means-nothing-to-do contract
+        process_once() already uses for a player request."""
+        if not _engain_continuity_dispatch_enabled():
+            return False
+
+        try:
+            claim_token = self._acquire_dispatch_claim()
+        except (
+            presence_authority_client.SessionOccupied,
+            presence_authority_client.PresenceAuthorityError,
+        ) as exc:
+            print(
+                f"[presence] coordination-only dispatch deferred: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return False
+
+        coordination_claim = self._claim_coordination_report()
+        if coordination_claim is None:
+            self._release_dispatch_claim(claim_token)
+            return False
+        claimed_coord_path, coord_basename, coord_attempt = coordination_claim
+        coordination_report = self._read_coordination_report(claimed_coord_path)
+        if coordination_report is None:
+            # Malformed — handled exactly like a failed delivery attempt,
+            # never trusted. See _read_coordination_report()'s own doc.
+            self._release_dispatch_claim(claim_token)
+            self._dispose_coordination_report(
+                claimed_coord_path, coord_basename, coord_attempt, succeeded=False
+            )
+            return True
+
+        delivered = False
+        try:
+            self._dispatch_via_engain_continuity("", coordination_report=coordination_report)
+            delivered = True
+        except engain_continuity_client.EngAinContinuityError as exc:
+            print(
+                f"Coordination-only continuity dispatch unavailable for {coord_basename}: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+        except Exception as exc:
+            detail = str(exc).replace("\n", " ")[:300]
+            print(
+                f"Coordination-only continuity dispatch failed for {coord_basename}: {detail}",
+                file=sys.stderr,
+                flush=True,
+            )
+        finally:
+            self._release_dispatch_claim(claim_token)
+
+        self._dispose_coordination_report(
+            claimed_coord_path, coord_basename, coord_attempt, succeeded=delivered
+        )
+        return True
 
     def _restore_claimed_request(self, claimed_path: Path) -> None:
         if not claimed_path.exists():
@@ -2178,7 +2299,7 @@ class HermesSessionAdapter:
                 # no pending report is the same as never sending the
                 # field.
                 engain_result = self._dispatch_via_engain_continuity(
-                    validated, coordination_report=coordination_report
+                    validated.player_input, coordination_report=coordination_report
                 )
                 safe_response = self._engain_continuity_response(engain_result, validated)
                 dragon_turn_succeeded = True
@@ -2912,9 +3033,15 @@ class HermesSessionAdapter:
 
     def _dispatch_via_engain_continuity(
         self,
-        validated: ValidatedRequest,
+        player_input: str,
         coordination_report: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        """player_input is a plain string, not a ValidatedRequest, so this
+        can be called both from a real, validated player turn
+        (player_input=validated.player_input) and from
+        _process_pending_coordination_report_without_player_turn()
+        (player_input="") — the latter has no ValidatedRequest to offer,
+        since no player request exists for that call at all."""
         shared_session_id = os.environ.get("ENGAIN_CONTINUITY_SHARED_SESSION_ID")
         if not shared_session_id:
             raise HermesAdapterError(
@@ -2925,7 +3052,7 @@ class HermesSessionAdapter:
         return engain_continuity_client.dispatch(
             shared_session_id=shared_session_id,
             origin_body=_ENGAIN_ORIGIN_BODY,
-            player_input=validated.player_input,
+            player_input=player_input,
             provider_id=binding_fields["provider_id"],
             model_id=binding_fields["model_id"],
             provider_session_id=binding_fields["provider_session_id"],
