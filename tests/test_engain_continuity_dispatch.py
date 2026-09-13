@@ -14,6 +14,7 @@ correctly consume the response," never re-proving the bridge.
 
 from __future__ import annotations
 
+import importlib
 import json
 import sys
 import threading
@@ -186,6 +187,37 @@ def test_client_raises_when_server_unreachable():
             base_url="http://127.0.0.1:1",
             timeout=1.0,
         )
+
+
+def test_default_client_timeout_exceeds_the_provider_timeout_by_the_configured_margin(monkeypatch):
+    """The 2026-09-13 fix: this client's own outer HTTP timeout must
+    never again independently coincide with (or fall below)
+    hermes_provider_adapter.DEFAULT_TIMEOUT_S in the EngAIn repo -- it
+    cannot import that value directly (see this module's own docstring
+    on why it's vendored), so the two are kept from drifting apart via a
+    shared env var name and an explicit provider+margin formula instead
+    of two independently hardcoded literals."""
+    monkeypatch.delenv("ENGAIN_CONTINUITY_PROVIDER_TIMEOUT_S", raising=False)
+    monkeypatch.delenv("ENGAIN_CONTINUITY_TIMEOUT_MARGIN_S", raising=False)
+    module = importlib.reload(engain_continuity_client)
+    try:
+        assert module.DEFAULT_TIMEOUT_S == 255.0
+        assert module.DEFAULT_TIMEOUT_S == 240.0 + 15.0  # provider + margin, not equal to either
+    finally:
+        importlib.reload(engain_continuity_client)
+
+
+def test_client_timeout_tracks_provider_timeout_via_shared_env_var(monkeypatch):
+    monkeypatch.setenv("ENGAIN_CONTINUITY_PROVIDER_TIMEOUT_S", "10")
+    monkeypatch.setenv("ENGAIN_CONTINUITY_TIMEOUT_MARGIN_S", "3")
+    module = importlib.reload(engain_continuity_client)
+    try:
+        assert module.DEFAULT_TIMEOUT_S == 13.0
+        assert module.DEFAULT_TIMEOUT_S > 10.0  # client always exceeds provider, never equal
+    finally:
+        monkeypatch.delenv("ENGAIN_CONTINUITY_PROVIDER_TIMEOUT_S", raising=False)
+        monkeypatch.delenv("ENGAIN_CONTINUITY_TIMEOUT_MARGIN_S", raising=False)
+        importlib.reload(engain_continuity_client)
 
 
 # --- HermesSessionAdapter's binding-field defaults/overrides --------------
@@ -532,3 +564,60 @@ def test_pending_coordination_report_publishes_only_tool_event_on_dispatch_failu
     assert events[0]["text"] == (
         "Request dragonreq_test: DONE — DragonAvatar3D.gd updated; validation not_checked"
     )
+
+
+def test_one_report_retried_three_times_produces_exactly_one_tool_event(
+    tmp_path, monkeypatch, fake_dispatch_server
+):
+    """The live-caught duplicate-[TOOL] bug (2026-09-13): a report's own
+    message_id is stable across retries -- only the attempt suffix in its
+    filename changes -- so retrying the DISPATCH three times (the real
+    COORDINATION_MAX_ATTEMPTS ceiling) must not announce the same real
+    editor action three times. Dispatch retry behavior itself (three real
+    HTTP attempts, landing in failed/) is unchanged and asserted here
+    too, not just the tool-event count."""
+    base_url, handler = fake_dispatch_server
+    handler.response_builder = staticmethod(
+        lambda body: (502, {"error": "PROVIDER_DISPATCH_FAILED"})
+    )
+    monkeypatch.setenv(COMPAT_ENV, "1")
+    monkeypatch.setenv("ENGAIN_CONTINUITY_DISPATCH", "1")
+    monkeypatch.setenv("ENGAIN_CONTINUITY_SHARED_SESSION_ID", "shared-dedup-test")
+    adapter, director = _prepared_adapter(tmp_path)
+    _write_editor_report(adapter.config, message_id="MSG_DEDUP_1")
+    adapter.prepare()
+
+    # Three ordinary failures: attempt0 -> attempt1 -> attempt2 -> failed/.
+    for _ in range(3):
+        completed = adapter.process_once()
+        assert completed is True
+
+    assert len(handler.received) == 3  # dispatch really was retried three times
+    failed_files = list(adapter.config.coordination_failed_dir.glob("*.json"))
+    assert len(failed_files) == 1  # landed in failed/ after the real max-attempts ceiling
+
+    events = _read_tool_events(adapter.config)
+    assert [e["kind"] for e in events] == ["tool"]  # exactly one, not three
+    assert events[0]["text"].startswith("Request dragonreq_test: DONE")
+
+
+def test_two_different_report_message_ids_each_publish_their_own_tool_event(
+    tmp_path, monkeypatch, fake_dispatch_server
+):
+    """The dedup gate must not over-fire: two genuinely different reports
+    each still publish normally."""
+    base_url, handler = fake_dispatch_server
+    monkeypatch.setenv(COMPAT_ENV, "1")
+    monkeypatch.setenv("ENGAIN_CONTINUITY_DISPATCH", "1")
+    monkeypatch.setenv("ENGAIN_CONTINUITY_SHARED_SESSION_ID", "shared-two-reports-test")
+    adapter, director = _prepared_adapter(tmp_path)
+    _write_editor_report(adapter.config, message_id="MSG_TWO_A")
+    adapter.prepare()
+    assert adapter.process_once() is True
+
+    _write_editor_report(adapter.config, message_id="MSG_TWO_B")
+    assert adapter.process_once() is True
+
+    events = _read_tool_events(adapter.config)
+    tool_events = [e for e in events if e["kind"] == "tool"]
+    assert len(tool_events) == 2  # one per distinct message_id, not deduplicated away

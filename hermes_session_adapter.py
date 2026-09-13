@@ -1823,8 +1823,11 @@ class HermesSessionAdapter:
         if coordination_report is None:
             # Malformed — handled exactly like a failed delivery attempt,
             # never trusted. See _read_coordination_report()'s own doc.
+            # coord_attempt == 0 gate: see the doc on the sibling publish
+            # call below — same reasoning, same fix.
             self._release_dispatch_claim(claim_token)
-            self._publish_tool_event("tool", "Editor report discarded: malformed or untrusted.")
+            if coord_attempt == 0:
+                self._publish_tool_event("tool", "Editor report discarded: malformed or untrusted.")
             self._dispose_coordination_report(
                 claimed_coord_path, coord_basename, coord_attempt, succeeded=False
             )
@@ -1832,11 +1835,23 @@ class HermesSessionAdapter:
 
         # The Editor's own work is already done and already a fact by
         # this point, regardless of whether the dispatch below succeeds —
-        # so the "tool" line is published unconditionally here, before
-        # attempting delivery, not gated on delivered succeeding. See
-        # _format_tool_completion_text()'s own doc for why this is built
-        # from the report's real fields, not a canned string.
-        self._publish_tool_event("tool", _format_tool_completion_text(coordination_report))
+        # so the "tool" line is published before attempting delivery, not
+        # gated on delivered succeeding. See _format_tool_completion_text()'s
+        # own doc for why this is built from the report's real fields.
+        #
+        # coord_attempt == 0 gate (2026-09-13 correction): a report's own
+        # message_id is stable across retries — only the attempt number
+        # in its filename changes (_dispose_coordination_report() renames
+        # editor_report.<message_id>.attempt{N}.json -> attempt{N+1} on
+        # ordinary failure) — so a report that fails delivery and gets
+        # retried was being re-read and re-announced on EVERY attempt,
+        # producing 3 identical [TOOL] lines for one real editor action
+        # (live-caught: exactly 3 duplicate events per request_id, ~90s
+        # apart, matching 3 retries before landing in failed/). Retrying
+        # the DISPATCH is unchanged and correct — this only stops the
+        # user-visible announcement from repeating alongside it.
+        if coord_attempt == 0:
+            self._publish_tool_event("tool", _format_tool_completion_text(coordination_report))
 
         delivered = False
         try:
@@ -2499,7 +2514,15 @@ class HermesSessionAdapter:
                 # Editor's work is already a completed fact regardless.
                 # See _format_tool_completion_text()'s own doc for why
                 # this is built from the report's real fields.
-                self._publish_tool_event("tool", _format_tool_completion_text(coordination_report))
+                #
+                # coord_attempt == 0 gate (2026-09-13 correction): same
+                # fix as _process_pending_coordination_report_without_
+                # player_turn()'s own identical gate — a retried report
+                # (same message_id, incremented attempt) must not be
+                # re-announced every time a player turn happens to claim
+                # it again.
+                if coord_attempt == 0:
+                    self._publish_tool_event("tool", _format_tool_completion_text(coordination_report))
             self._dispose_coordination_report(
                 claimed_coord_path,
                 coord_basename,

@@ -35,11 +35,60 @@ from typing import Any, Dict, Optional, Tuple
 
 _FALLBACK_BASE_URL = "http://127.0.0.1:8767"
 
+# Corrected 2026-09-13: this client's own HTTP timeout and EngAIn's
+# hermes_provider_adapter.DEFAULT_TIMEOUT_S used to be two independently
+# hardcoded, numerically EQUAL 90.0 constants in two different repos —
+# exactly why a real 152.09s successful `hermes chat --resume` call (see
+# that day's receipt) could never return cleanly: the outer HTTP timeout
+# raced the inner subprocess timeout it was supposed to be waiting on,
+# with zero margin, and this client's own clock starts earlier in the
+# chain (HTTP connect + the server's own claim/register/Ledger steps all
+# happen before the server's subprocess.run() even begins).
+#
+# This client cannot import hermes_provider_adapter.DEFAULT_TIMEOUT_S
+# directly (see this module's own docstring on why it's vendored, not
+# dependent on EngAIn's package tree) — so the two are kept from
+# drifting apart via a SHARED ENV VAR NAME instead of a shared import:
+# ENGAIN_CONTINUITY_PROVIDER_TIMEOUT_S, read on both sides, with the
+# SAME 240.0 default hermes_provider_adapter.py documents (itself derived
+# from that real 152.09s observation, not picked in the abstract).
+# ENGAIN_CONTINUITY_TIMEOUT_MARGIN_S is this side's own margin on top of
+# it — the same "outer must exceed inner, with a real margin" pattern
+# EngAIn's own dispatch-claim lease already uses
+# (_DISPATCH_CLAIM_MARGIN_SECONDS), not equality.
+_DEFAULT_PROVIDER_TIMEOUT_S = 240.0
+_DEFAULT_TIMEOUT_MARGIN_S = 15.0
+
 
 def _default_base_url() -> str:
     """Read fresh on every call, not bound once at import time — same
     reasoning as presence_authority_client._default_base_url()."""
     return os.environ.get("ENGAIN_PRESENCE_AUTHORITY_URL", _FALLBACK_BASE_URL)
+
+
+def _provider_timeout_s() -> float:
+    raw = os.environ.get("ENGAIN_CONTINUITY_PROVIDER_TIMEOUT_S")
+    return float(raw) if raw else _DEFAULT_PROVIDER_TIMEOUT_S
+
+
+def _timeout_margin_s() -> float:
+    raw = os.environ.get("ENGAIN_CONTINUITY_TIMEOUT_MARGIN_S")
+    return float(raw) if raw else _DEFAULT_TIMEOUT_MARGIN_S
+
+
+def _default_client_timeout_s() -> float:
+    """ALWAYS provider_timeout + margin — a formula, not a bare literal —
+    so this can never again independently coincide with (or fall below)
+    the inner subprocess timeout it's supposed to safely outlast."""
+    return _provider_timeout_s() + _timeout_margin_s()
+
+
+# Bound once at import time, matching this module's existing pattern for
+# every other default (e.g. dispatch()'s prior bare `timeout: float =
+# 90.0`) — only _default_base_url() above is deliberately re-read per
+# call, for a different reason (a base URL can change; a timeout budget
+# has no comparable need to).
+DEFAULT_TIMEOUT_S = _default_client_timeout_s()
 
 
 class EngAinContinuityError(RuntimeError):
@@ -83,7 +132,7 @@ def dispatch(
     snapshot: Optional[Dict[str, Any]] = None,
     coordination_report: Optional[Dict[str, Any]] = None,
     base_url: Optional[str] = None,
-    timeout: float = 90.0,
+    timeout: float = DEFAULT_TIMEOUT_S,
 ) -> Dict[str, Any]:
     """Submits one bare request plus this worker's own ProviderSessionBinding
     fields to EngAIn's /dispatch. Returns SharedSessionBridge.handle_turn()'s
