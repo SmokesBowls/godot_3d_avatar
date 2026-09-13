@@ -29,7 +29,13 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from hermes_session_adapter import AdapterConfig, HermesAdapterError, HermesSessionAdapter
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from test_hermes_session_adapter import CAPTURED_AT, _build_request, _retime_request, _valid_session_state  # noqa: E402
+from test_hermes_session_adapter import (  # noqa: E402
+    CAPTURED_AT,
+    _build_request,
+    _retime_request,
+    _valid_session_state,
+    _write_editor_report,
+)
 
 import engain_continuity_client
 
@@ -277,3 +283,39 @@ def test_process_claimed_request_uses_engain_continuity_when_enabled(
     response = json.loads(adapter.config.response_file.read_text())
     assert response["narrative_response"].startswith("canned answer to:")
     assert "EngAIn shared continuity" in response["director_analysis"]
+
+
+def test_pending_coordination_report_reaches_dispatch_and_is_marked_consumed(
+    tmp_path, monkeypatch, fake_dispatch_server
+):
+    """A pending Editor coordination report combined with continuity
+    dispatch is now a SUPPORTED combination (2026-09-12) — previously
+    this refused outright with COORDINATION_UNSUPPORTED_ON_CONTINUITY_
+    DISPATCH. Proves: (1) the report is sent to /dispatch as its own
+    field, never folded into player_input; (2) a successful continuity
+    turn marks the report delivered (moved to consumed/), not retried."""
+    base_url, handler = fake_dispatch_server
+    monkeypatch.setenv(COMPAT_ENV, "1")
+    monkeypatch.setenv("ENGAIN_CONTINUITY_DISPATCH", "1")
+    monkeypatch.setenv("ENGAIN_CONTINUITY_SHARED_SESSION_ID", "shared-coordination-test")
+    adapter, director = _prepared_adapter(tmp_path)
+    report_path = _write_editor_report(adapter.config, message_id="MSG_CONTINUITY_1")
+    adapter.prepare()
+    payload = _build_request(tmp_path)
+    _retime_request(tmp_path, payload)
+    adapter.config.request_file.write_bytes(json.dumps(payload).encode())
+
+    completed = adapter.process_once()
+
+    assert completed is True
+    assert director.calls == 0
+    assert len(handler.received) == 1
+    sent = handler.received[0]
+    assert sent["player_input"] == payload["player_input"]  # verbatim, unmodified
+    assert sent["coordination_report"]["message_id"] == "MSG_CONTINUITY_1"
+    assert sent["coordination_report"]["status"] == "applied"
+
+    # Delivered on a successful turn -> moved to consumed/, not retried.
+    assert not report_path.exists()
+    consumed_path = adapter.config.coordination_consumed_dir / report_path.name
+    assert consumed_path.exists()

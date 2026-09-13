@@ -81,6 +81,7 @@ def dispatch(
     instance_id: Optional[str] = None,
     launch_options: Optional[Dict[str, Any]] = None,
     snapshot: Optional[Dict[str, Any]] = None,
+    coordination_report: Optional[Dict[str, Any]] = None,
     base_url: Optional[str] = None,
     timeout: float = 90.0,
 ) -> Dict[str, Any]:
@@ -88,7 +89,15 @@ def dispatch(
     fields to EngAIn's /dispatch. Returns SharedSessionBridge.handle_turn()'s
     own shape unmodified: {"session_id", "origin_body", "actor", "response",
     "turn_id"}. Raises EngAinContinuityError on any non-200 response or on
-    an unreachable server — never returns a partial or guessed result."""
+    an unreachable server — never returns a partial or guessed result.
+
+    coordination_report, when given, is the Phase 1 sideband coordination
+    lane's claimed engain.editor_report.v1 dict (see hermes_session_adapter
+    .py's own "Phase 1 sideband coordination lane" section) — sent as its
+    own body field, exactly like snapshot above, never merged into
+    player_input. EngAIn's own ContinuityContextBuilder decides how (or
+    whether) it shapes what actually gets dispatched; this client's only
+    job is carrying it there unmodified."""
     base_url = base_url or _default_base_url()
     payload: Dict[str, Any] = {
         "shared_session_id": shared_session_id,
@@ -106,6 +115,8 @@ def dispatch(
         payload["launch_options"] = launch_options
     if snapshot is not None:
         payload["snapshot"] = snapshot
+    if coordination_report is not None:
+        payload["coordination_report"] = coordination_report
 
     status, body = _post("/dispatch", payload, base_url, timeout)
     if status != 200:

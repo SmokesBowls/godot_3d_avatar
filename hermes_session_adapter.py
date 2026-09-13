@@ -151,9 +151,6 @@ EDITOR_DIRECTIVE_PATTERN = re.compile(
     r"\[EDITOR_REQUEST\]\s*(?P<body>.*?)\s*\[/EDITOR_REQUEST\]", re.DOTALL
 )
 DIRECTIVE_ONLY_ACKNOWLEDGEMENT = "Editor request sent."
-COORDINATION_UNSUPPORTED_ON_CONTINUITY_DISPATCH = (
-    "COORDINATION_CONTEXT_UNSUPPORTED_ON_CONTINUITY_DISPATCH"
-)
 RESPONSE_SCHEMA = "engain.hermes_mailbox_response.v1"
 PERCEPTION_SCHEMA = "engain.runtime_perception.v1"
 SNAPSHOT_SCHEMA = "engain.runtime_snapshot.v1"
@@ -2166,7 +2163,6 @@ class HermesSessionAdapter:
         # and "valid" mean here.
         coordination_claim = self._claim_coordination_report()
         coordination_report: dict[str, Any] | None = None
-        coordination_structural_refusal = False
         if coordination_claim is not None:
             claimed_coord_path, coord_basename, coord_attempt = coordination_claim
             coordination_report = self._read_coordination_report(claimed_coord_path)
@@ -2174,24 +2170,18 @@ class HermesSessionAdapter:
         dragon_turn_succeeded = False
         self.client.pending_perception = validated.perception
         try:
-            if coordination_report is not None and _engain_continuity_dispatch_enabled():
-                # The continuity-dispatch path bypasses _format_messages()
-                # entirely (see _dispatch_via_engain_continuity below), so
-                # it has no equivalent injection point yet. Refuse this
-                # combination explicitly rather than silently dropping the
-                # report or silently ignoring it as context.
-                coordination_structural_refusal = True
-                safe_response = self._error_response(
-                    "Editor coordination is not yet supported while continuity "
-                    "dispatch is active.",
-                    request_id,
-                    client_request_id,
-                    perception=validated.perception,
-                    failure_code=COORDINATION_UNSUPPORTED_ON_CONTINUITY_DISPATCH,
+            if _engain_continuity_dispatch_enabled():
+                # EngAIn's /dispatch now carries coordination_report
+                # separately from player_input all the way through to
+                # ContinuityContextBuilder.build() (2026-09-12) — no
+                # refusal needed here any more; passing None when there is
+                # no pending report is the same as never sending the
+                # field.
+                engain_result = self._dispatch_via_engain_continuity(
+                    validated, coordination_report=coordination_report
                 )
-            elif _engain_continuity_dispatch_enabled():
-                engain_result = self._dispatch_via_engain_continuity(validated)
                 safe_response = self._engain_continuity_response(engain_result, validated)
+                dragon_turn_succeeded = True
             else:
                 self.client.pending_coordination = coordination_report
                 response = director_bridge.process_player_input(
@@ -2243,7 +2233,9 @@ class HermesSessionAdapter:
                 coord_basename,
                 coord_attempt,
                 succeeded=report_delivered,
-                structural_refusal=coordination_structural_refusal,
+                # structural_refusal defaults to False: there is no longer
+                # a structural (this-combination-is-unsupported) refusal
+                # path here — see the try block above.
             )
 
         self._write_response(safe_response)
@@ -2918,7 +2910,11 @@ class HermesSessionAdapter:
             "launch_options": launch_options,
         }
 
-    def _dispatch_via_engain_continuity(self, validated: ValidatedRequest) -> dict[str, Any]:
+    def _dispatch_via_engain_continuity(
+        self,
+        validated: ValidatedRequest,
+        coordination_report: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         shared_session_id = os.environ.get("ENGAIN_CONTINUITY_SHARED_SESSION_ID")
         if not shared_session_id:
             raise HermesAdapterError(
@@ -2936,6 +2932,7 @@ class HermesSessionAdapter:
             agent_id=binding_fields["provider_id"],
             instance_id=self._presence_instance_id(),
             launch_options=binding_fields["launch_options"],
+            coordination_report=coordination_report,
         )
 
     def _engain_continuity_response(
