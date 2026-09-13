@@ -33,6 +33,24 @@ var _dragon_request_rows: Dictionary = {}  # outbox path (String) -> row Control
 var _pending_dragon_request: Dictionary = {}  # {} when no coordination turn is in flight
 var _pending_dragon_request_path: String = ""
 var _dragon_poll_accumulator_sec: float = 0.0
+
+# EXPERIMENTAL (2026-09-13 correction) — see
+# _experimental_reload_edited_scene_via_api()'s own doc. The first attempt
+# called that function from _on_turn_finished(), which only runs once the
+# ENTIRE (possibly multi-minute) Hermes turn returns — a real DIRECT_WRITE
+# request stays "WORKING" for the whole subprocess call, and Hermes's own
+# actual file write happens somewhere INSIDE that call, on the background
+# thread, long before _on_turn_finished() fires on the main thread. Live-
+# caught: Godot's own external-change dialog appeared while the row still
+# said WORKING — proving the write (and Godot's own async detection of
+# it) both happened well before the late call site ever ran. This polls
+# Main.tscn's own mtime while a DIRECT_WRITE turn is in flight so the
+# reload call can fire the moment the write is detected instead.
+const _EXPERIMENTAL_RELOAD_SCENE_PATH := "res://scenes/Main.tscn"
+const _EXPERIMENTAL_RELOAD_POLL_INTERVAL_SEC := 0.5
+var _experimental_reload_poll_accumulator_sec: float = 0.0
+var _experimental_reload_scene_mtime_before_turn: int = -1
+var _experimental_reload_fired_this_turn: bool = false
 const _DRAGON_POLL_INTERVAL_SEC := 1.0
 
 # Additional recipient (Phase 0, human-relayed) — see hermes_bridge.gd's
@@ -93,13 +111,50 @@ func _process(delta: float) -> void:
 	# safe; _dragon_request_rows just prevents re-adding a row for one
 	# already shown.
 	_dragon_poll_accumulator_sec += delta
-	if _dragon_poll_accumulator_sec < _DRAGON_POLL_INTERVAL_SEC:
+	if _dragon_poll_accumulator_sec >= _DRAGON_POLL_INTERVAL_SEC:
+		_dragon_poll_accumulator_sec = 0.0
+		for entry in HermesBridgeScript.list_pending_dragon_requests():
+			var path: String = entry["path"]
+			if not _dragon_request_rows.has(path):
+				_add_dragon_request_row(entry["request"], path)
+
+	# EXPERIMENTAL (2026-09-13) — see _experimental_reload_edited_scene_via_api()'s
+	# own doc and the var declarations above. Only active while a
+	# DIRECT_WRITE turn is actually in flight (_experimental_reload_
+	# scene_mtime_before_turn is set to -1 whenever it isn't, or once
+	# already fired this turn).
+	if _busy and _experimental_reload_scene_mtime_before_turn >= 0 and not _experimental_reload_fired_this_turn:
+		_experimental_reload_poll_accumulator_sec += delta
+		if _experimental_reload_poll_accumulator_sec >= _EXPERIMENTAL_RELOAD_POLL_INTERVAL_SEC:
+			_experimental_reload_poll_accumulator_sec = 0.0
+			var absolute_path := ProjectSettings.globalize_path(_EXPERIMENTAL_RELOAD_SCENE_PATH)
+			if FileAccess.file_exists(absolute_path):
+				var current_mtime := FileAccess.get_modified_time(absolute_path)
+				if current_mtime != _experimental_reload_scene_mtime_before_turn:
+					_experimental_reload_fired_this_turn = true
+					LifecycleProbe.trace(
+						"experimental_reload: mtime changed mid-turn (before=%d after=%d) -- firing early, turn still in flight"
+						% [_experimental_reload_scene_mtime_before_turn, current_mtime]
+					)
+					_experimental_reload_edited_scene_via_api()
+
+
+## EXPERIMENTAL (2026-09-13) — records Main.tscn's own mtime right before
+## a turn starts, but only for DIRECT_WRITE (the only mode that can
+## actually change it). -1 means "no baseline armed" — the _process()
+## poll above checks exactly that sentinel to know whether to watch at
+## all this turn.
+func _experimental_record_reload_baseline_if_direct_write(mode: String) -> void:
+	_experimental_reload_fired_this_turn = false
+	_experimental_reload_scene_mtime_before_turn = -1
+	if mode != HermesBridgeScript.MODE_DIRECT_WRITE:
 		return
-	_dragon_poll_accumulator_sec = 0.0
-	for entry in HermesBridgeScript.list_pending_dragon_requests():
-		var path: String = entry["path"]
-		if not _dragon_request_rows.has(path):
-			_add_dragon_request_row(entry["request"], path)
+	var absolute_path := ProjectSettings.globalize_path(_EXPERIMENTAL_RELOAD_SCENE_PATH)
+	if FileAccess.file_exists(absolute_path):
+		_experimental_reload_scene_mtime_before_turn = FileAccess.get_modified_time(absolute_path)
+	LifecycleProbe.trace(
+		"experimental_reload: armed for this turn, baseline mtime=%d" % _experimental_reload_scene_mtime_before_turn
+	)
 
 
 func _ensure_temporary_trial_ui() -> void:
@@ -262,6 +317,7 @@ func _on_send_pressed() -> void:
 		if _mode_selector.get_selected_id() == 1
 		else HermesBridgeScript.MODE_SAFE_REVIEW
 	)
+	_experimental_record_reload_baseline_if_direct_write(selected_mode)
 	_bridge.send(
 		message,
 		_model_input.text.strip_edges(),
@@ -320,7 +376,11 @@ func _on_turn_finished(result: Dictionary) -> void:
 			audit += "    " + String(change) + "\n"
 		audit += "  Review this list against the exact request before restarting the runtime."
 		_append_transcript(audit)
-		_experimental_reload_edited_scene_via_api()
+		# EXPERIMENTAL reload call REMOVED from here 2026-09-13: live-caught
+		# too late (Godot's own external-change dialog already appeared
+		# while this turn still said WORKING) — see _process()'s own poll
+		# and _experimental_record_reload_baseline_if_direct_write() for
+		# where this experiment actually fires now.
 	elif safety_violation:
 		var warning := "⚠ SAFETY VIOLATION — live project file(s) changed outside .hermes_scratch/ this turn:\n"
 		for v in changes:
@@ -403,32 +463,45 @@ func _append_transcript(line: String) -> void:
 
 
 ## EXPERIMENTAL, BOUNDED PROOF ONLY (2026-09-13) — see _lifecycle_probe.gd's
-## own doc and that day's design note/receipt on the composed-editor
+## own doc and that day's design notes/receipts on the composed-editor
 ## SIGSEGV/SIGABRT-on-external-reload investigation. NOT the adopted fix.
 ##
 ## Question this answers, nothing broader: does calling
-## EditorInterface.reload_scene_from_path() ourselves, immediately after a
-## successful DIRECT_WRITE, safely bring the already-open Main.tscn
-## current WITHOUT going through the crash-correlated path (Godot's own
-## async EditorFileSystem external-change detection -> the human-facing
-## "Reload from disk" dialog -> the human accepting it)? The prior trace
-## (hermes_lifecycle_trace.log) proved the plugin is idle in the ~2.5
-## minutes before that dialog-triggered abort and that the last signal
-## before it is EditorFileSystem.sources_changed — it did NOT prove that
-## THIS API call reaches different, safer engine code than the dialog's
-## own "Reload from disk" button does. That is exactly what this
-## instrumented call is for. Traced immediately before and after so a
-## crash exactly at this call, vs. surviving it, is unambiguous either
-## way — if the trace log's last line is "...about to call..." with no
-## matching "...returned normally" after a fresh crash, the API call
-## itself is where it died, same as the human button; if "...returned
-## normally" appears, this survived a case the manual dialog does not.
+## EditorInterface.reload_scene_from_path() ourselves safely bring the
+## already-open Main.tscn current WITHOUT going through the crash-
+## correlated path (Godot's own async EditorFileSystem external-change
+## detection -> the human-facing "Reload from disk" dialog -> the human
+## accepting it)?
+##
+## CORRECTED call site (2026-09-13, second pass): the first attempt
+## called this from _on_turn_finished(), which only runs once the ENTIRE
+## (possibly multi-minute) Hermes turn returns. Live-caught: Godot's own
+## dialog already appeared while the request still said WORKING — the
+## actual file write happens deep inside the still-running background-
+## thread subprocess call, long before _on_turn_finished() ever fires.
+## So this is now called from _process()'s own poll, the moment Main
+## .tscn's mtime is observed to change WHILE the turn is still in flight
+## (see _experimental_record_reload_baseline_if_direct_write() and the
+## var declarations near the top of this file) — as early as this code
+## can possibly know the write happened, given that the write itself is
+## a black box inside a real Hermes subprocess call. Traced immediately
+## before and after so a crash exactly at this call, vs. surviving it, is
+## unambiguous either way in hermes_lifecycle_trace.log.
+##
+## Caveat this earlier call site introduces, deliberately accepted for
+## a bounded experiment: Hermes may still be actively running (and could
+## still be mid-write, or make further edits later in the same turn)
+## when this fires — unlike the old call site, which only ever ran after
+## the whole turn was verifiably finished. That is a real, open question
+## this experiment does not resolve; it answers only whether the API
+## itself survives being called at this earlier point, not whether
+## "reload while still possibly writing" is the right long-term design.
 ##
 ## Deliberately narrow: only Main.tscn (this exact investigation's own
-## scene), only after a real DIRECT_WRITE change, no toggle/config added,
-## does not touch runtime auto-reload, continuity, timeouts, authority,
-## or the lost-HUD-text issue. Whether to keep, remove, or generalize
-## this depends entirely on what the next real DIRECT_WRITE turn's trace
+## scene), only for DIRECT_WRITE turns, no toggle/config added, does not
+## touch runtime auto-reload, continuity, timeouts, authority, or the
+## lost-HUD-text issue. Whether to keep, remove, or generalize this
+## depends entirely on what the next real DIRECT_WRITE turn's trace
 ## shows — not decided by this comment.
 func _experimental_reload_edited_scene_via_api() -> void:
 	if editor_interface == null:
@@ -577,4 +650,5 @@ func _process_dragon_coordination_request(request: Dictionary, path: String, mod
 	_stop_button.disabled = false
 	_mode_selector.disabled = true
 	_status_label.text = "⏳ Processing Dragon coordination request (DIRECT_WRITE)... a real Hermes turn can take a few minutes."
+	_experimental_record_reload_baseline_if_direct_write(mode)
 	_bridge.send(body, _model_input.text.strip_edges(), _provider_input.text.strip_edges(), mode)
