@@ -848,6 +848,20 @@ class AdapterConfig:
     def coordination_outbox_dir(self) -> Path:
         return self._coordination_root / "outbox"
 
+    @property
+    def tool_events_dir(self) -> Path:
+        # Sibling of _coordination_root, same flat-vs-namespaced branching.
+        # Purely a display/log channel for the in-game HUD (see
+        # EngAInBridge3D.gd's own tool-events poll) — carries no
+        # authority and is never read by anything that gates dispatch or
+        # decides request/response correlation. It must never become a
+        # second, competing source of truth for anything the strict
+        # response.json contract (_validate_correlated_response on the
+        # Godot side) already owns.
+        if self.mailbox_root == self.project_dir:
+            return self.project_dir / "tool_events"
+        return cast(Path, self.mailbox_root) / CALLER_ID / "tool_events"
+
 
 @dataclass(frozen=True)
 class ValidatedPerception:
@@ -1725,12 +1739,14 @@ class HermesSessionAdapter:
           was ever issued for it), and process_once() itself refuses to
           claim a new player request while response_file exists —
           writing one here would wedge every subsequent real player turn
-          behind a file nothing would ever correlate to and claim. The
-          resulting narrative response is therefore absorbed into
-          EngAIn's own Ledger (visible to a future real turn's recap via
-          the missing-context path) but is not surfaced to the player
-          directly by this method — a deliberate, stated limitation, not
-          an oversight.
+          behind a file nothing would ever correlate to and claim.
+          Resolved (2026-09-13, was previously a stated limitation): the
+          Editor's completion and Dragon's reaction are instead published
+          to _publish_tool_event() as "tool"/"dragon" lines — a separate,
+          display-only channel EngAInBridge3D.gd polls independently of
+          the strict response.json correlation contract, so this never
+          touches (or risks colliding with) an actually-active player
+          submission.
 
         Returns True if a report was found (delivered, or read/dispatch
         failed and was requeued/retired), False if there was nothing to
@@ -1764,15 +1780,38 @@ class HermesSessionAdapter:
             # Malformed — handled exactly like a failed delivery attempt,
             # never trusted. See _read_coordination_report()'s own doc.
             self._release_dispatch_claim(claim_token)
+            self._publish_tool_event("tool", "Editor report discarded: malformed or untrusted.")
             self._dispose_coordination_report(
                 claimed_coord_path, coord_basename, coord_attempt, succeeded=False
             )
             return True
 
+        # The Editor's own work is already done and already a fact by
+        # this point, regardless of whether the dispatch below succeeds —
+        # so the "tool" line is published unconditionally here, before
+        # attempting delivery, not gated on delivered succeeding.
+        report_status = coordination_report.get("status", "unknown")
+        report_summary = coordination_report.get("execution_summary") or coordination_report.get("body", "")
+        if report_status == "applied":
+            self._publish_tool_event("tool", f"Proposal complete — {report_summary}")
+        else:
+            self._publish_tool_event("tool", f"Proposal failed — {report_summary}")
+
         delivered = False
         try:
-            self._dispatch_via_engain_continuity("", coordination_report=coordination_report)
+            engain_result = self._dispatch_via_engain_continuity(
+                "", coordination_report=coordination_report
+            )
             delivered = True
+            # This path writes no response.json (see this method's own
+            # doc), so this is the ONLY way Dragon's reaction to the tool
+            # event reaches the player at all — unlike the player-turn
+            # path's own coordination delivery, where the real reply
+            # already renders normally through response.json and
+            # publishing it again here would just duplicate it.
+            reply = str(engain_result.get("response", "")).strip()
+            if reply:
+                self._publish_tool_event("dragon", reply)
         except engain_continuity_client.EngAinContinuityError as exc:
             print(
                 f"Coordination-only continuity dispatch unavailable for {coord_basename}: {exc}",
@@ -1960,6 +1999,45 @@ class HermesSessionAdapter:
                 f"Could not file away Editor coordination report {original_basename}: {exc}",
                 flush=True,
             )
+
+    def _publish_tool_event(self, kind: str, text: str) -> None:
+        """Writes one small, display-only event for the in-game HUD's
+        transcript (EngAInBridge3D.gd polls tool_events_dir and re-emits
+        each one through its own log_line signal, exactly like a "user"/
+        "dragon"/"sys" line — see that file's own doc). This is
+        deliberately NOT the response.json contract:
+        _validate_correlated_response() on the Godot side requires an
+        active, player-initiated lifecycle (_busy, _active_request_id) to
+        accept anything, and a coordination-only delivery has neither —
+        forcing this through that channel would either be silently
+        discarded as stale or, worse, risk colliding with a genuinely
+        active player submission. This channel carries no authority and
+        is read by nothing that gates dispatch or correlation; it only
+        ever adds a visible line to the transcript. Best-effort: a
+        failure to write here must never interrupt the coordination
+        report's own delivery/disposal, so this never raises past its
+        own boundary.
+
+        Filename ordering: zero-padded time.time_ns(), NOT
+        strftime's second-resolution timestamp — a "tool" event and its
+        "dragon" reaction (see
+        _process_pending_coordination_report_without_player_turn()) are
+        routinely published within the same wall-clock second, and both
+        this method's own directory listing (were it ever needed) and
+        EngAInBridge3D.gd's _poll_tool_events() sort by filename; a
+        second-resolution timestamp would make two same-second events
+        sort by their random suffix instead of publication order, which
+        showed up as a real, reproducible test failure (dragon rendered
+        before tool) before this fix."""
+        try:
+            events_dir = self.config.tool_events_dir
+            events_dir.mkdir(parents=True, exist_ok=True)
+            event_id = "event_{:020d}_{}".format(time.time_ns(), secrets.token_hex(4))
+            payload = {"kind": kind, "text": text, "created_at": time.time()}
+            destination = events_dir / f"{event_id}.json"
+            self._atomic_write_no_replace(destination, json.dumps(payload, ensure_ascii=False) + "\n")
+        except Exception as exc:
+            print(f"Could not publish tool event ({kind}): {exc}", file=sys.stderr, flush=True)
 
     def _publish_dragon_directive(self, body: str, client_request_id: str) -> None:
         """Writes one engain.dragon_request.v1 envelope to the outbox,
@@ -2349,6 +2427,29 @@ class HermesSessionAdapter:
 
         if coordination_claim is not None:
             report_delivered = coordination_report is not None and dragon_turn_succeeded
+            if coordination_report is not None:
+                # Only the "tool" line here, not "dragon" — this turn's
+                # real reply already renders normally through
+                # response.json/_emit_dragon() for whichever player sent
+                # the message that happened to claim this report; a
+                # second "dragon" tool-event would just duplicate it. See
+                # _process_pending_coordination_report_without_player_turn()
+                # for the path where that duplication risk doesn't apply
+                # because no response.json gets written at all.
+                #
+                # Published on the Editor's own status fact, same as that
+                # method — NOT gated on report_delivered (whether THIS
+                # player turn's own dispatch happened to succeed): the
+                # Editor's work is already a completed fact regardless.
+                report_status = coordination_report.get("status", "unknown")
+                report_summary = (
+                    coordination_report.get("execution_summary")
+                    or coordination_report.get("body", "")
+                )
+                if report_status == "applied":
+                    self._publish_tool_event("tool", f"Proposal complete — {report_summary}")
+                else:
+                    self._publish_tool_event("tool", f"Proposal failed — {report_summary}")
             self._dispose_coordination_report(
                 claimed_coord_path,
                 coord_basename,

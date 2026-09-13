@@ -74,6 +74,7 @@ func _append(kind: String, text: String) -> void:
 	match kind:
 		"user":  color = "#FFD54A"; label = "YOU"
 		"dragon": color = "#4DD0E1"; label = "DRAGON"
+		"tool":  color = "#66BB6A"; label = "TOOL"
 		"lore":  color = "#FFB74D"; label = "LORE"
 		"sys":   color = "#B0BEC5"; label = "SYS"
 		"err":   color = "#EF5350"; label = "ERR"

@@ -391,3 +391,74 @@ def test_pending_coordination_report_stays_retryable_on_dispatch_failure(
     assert len(handler.received) == 2
     assert not retried_path.exists()
     assert (adapter.config.coordination_consumed_dir / retried_path.name).exists()
+
+
+def _read_tool_events(config) -> list:
+    events_dir = config.tool_events_dir
+    if not events_dir.is_dir():
+        return []
+    events = []
+    for path in sorted(events_dir.glob("*.json")):
+        events.append(json.loads(path.read_text()))
+    return events
+
+
+def test_pending_coordination_report_publishes_tool_and_dragon_events(
+    tmp_path, monkeypatch, fake_dispatch_server
+):
+    """The 2026-09-13 ask: Editor completion must show as [TOOL] in the
+    live transcript, and Dragon's reaction to it must show as [DRAGON] --
+    both via the separate, display-only tool_events channel, since this
+    path writes no response.json at all (see
+    _process_pending_coordination_report_without_player_turn()'s own
+    doc for why response.json is the wrong channel here)."""
+    base_url, handler = fake_dispatch_server
+    handler.response_builder = staticmethod(
+        lambda body: (200, {
+            "session_id": body.get("shared_session_id"),
+            "origin_body": body.get("origin_body"),
+            "actor": body.get("provider_id"),
+            "response": "The tower now stands ready.",
+            "turn_id": 9,
+        })
+    )
+    monkeypatch.setenv(COMPAT_ENV, "1")
+    monkeypatch.setenv("ENGAIN_CONTINUITY_DISPATCH", "1")
+    monkeypatch.setenv("ENGAIN_CONTINUITY_SHARED_SESSION_ID", "shared-tool-event-test")
+    adapter, director = _prepared_adapter(tmp_path)
+    _write_editor_report(adapter.config, message_id="MSG_TOOL_EVENT_1")
+    adapter.prepare()
+
+    completed = adapter.process_once()
+    assert completed is True
+
+    events = _read_tool_events(adapter.config)
+    assert [e["kind"] for e in events] == ["tool", "dragon"]
+    assert events[0]["text"].startswith("Proposal complete")
+    assert "Modified 1 file(s)." in events[0]["text"]  # _write_editor_report()'s own execution_summary
+    assert events[1]["text"] == "The tower now stands ready."
+
+
+def test_pending_coordination_report_publishes_only_tool_event_on_dispatch_failure(
+    tmp_path, monkeypatch, fake_dispatch_server
+):
+    """A [TOOL] line is honest regardless of delivery outcome -- the
+    Editor's own work is a fact whether or not Dragon heard about it --
+    but there must be no [DRAGON] line invented when there was no reply."""
+    base_url, handler = fake_dispatch_server
+    handler.response_builder = staticmethod(
+        lambda body: (502, {"error": "PROVIDER_DISPATCH_FAILED"})
+    )
+    monkeypatch.setenv(COMPAT_ENV, "1")
+    monkeypatch.setenv("ENGAIN_CONTINUITY_DISPATCH", "1")
+    monkeypatch.setenv("ENGAIN_CONTINUITY_SHARED_SESSION_ID", "shared-tool-event-fail-test")
+    adapter, director = _prepared_adapter(tmp_path)
+    _write_editor_report(adapter.config, message_id="MSG_TOOL_EVENT_FAIL")
+    adapter.prepare()
+
+    completed = adapter.process_once()
+    assert completed is True
+
+    events = _read_tool_events(adapter.config)
+    assert [e["kind"] for e in events] == ["tool"]
+    assert events[0]["text"].startswith("Proposal complete")

@@ -12,6 +12,15 @@ const PROJECT_ROOT := "/mnt/data-drive/godot_engain_3d_avatar"
 const MAILBOX_ROOT := "/mnt/data-drive/engain-runtime-mailboxes/dragon3d"
 const REQUEST_MAILBOX_PATH := MAILBOX_ROOT + "/request.json"
 const RESPONSE_MAILBOX_PATH := MAILBOX_ROOT + "/response.json"
+# Display-only channel (hermes_session_adapter.py's own
+# _publish_tool_event()) — deliberately separate from
+# REQUEST_MAILBOX_PATH/RESPONSE_MAILBOX_PATH's strict, correlation-gated
+# contract. Carries no authority: nothing here ever sets _busy, claims a
+# dispatch lock, or feeds _validate_correlated_response(). It only ever
+# adds a line to the transcript via the same log_line signal a normal
+# "user"/"dragon"/"sys" line already uses.
+const TOOL_EVENTS_DIR := MAILBOX_ROOT + "/tool_events"
+const TOOL_EVENTS_HANDLED_DIR := MAILBOX_ROOT + "/tool_events_handled"
 const ADAPTER_PATH := "/mnt/data-drive/godot_engain_3d_avatar/hermes_session_adapter.py"
 const PYTHON_EXECUTABLE := "/usr/bin/python3"
 const FROZEN_SESSION_ID := "20260731_065008_63a62d"
@@ -185,6 +194,7 @@ func _process(delta: float) -> void:
 		return
 	_poll_accumulator_sec = fmod(_poll_accumulator_sec, POLL_INTERVAL_SEC)
 	_poll_response_mailbox()
+	_poll_tool_events()
 
 
 func submit(text: String) -> void:
@@ -698,6 +708,58 @@ func _emit_lore(text: String) -> void:
 
 func _emit_sys(text: String) -> void:
 	emit_signal("log_line", "sys", text)
+
+
+## Discovers every pending tool_events_dir file (oldest first), re-emits
+## each one through the same log_line signal a "user"/"dragon"/"sys" line
+## already uses, and relocates it to TOOL_EVENTS_HANDLED_DIR so it is
+## never rendered twice. This is purely a transcript feed — it never
+## touches _busy/_active_request_id or anything
+## _validate_correlated_response() owns; see this file's own doc on
+## TOOL_EVENTS_DIR for why that separation matters. A malformed entry is
+## silently relocated without emitting anything, the same "don't destroy
+## evidence, don't crash the poll, don't render garbage" convention this
+## project already applies to a malformed coordination-request sidecar.
+func _poll_tool_events() -> void:
+	var dir := DirAccess.open(TOOL_EVENTS_DIR)
+	if dir == null:
+		return
+	dir.list_dir_begin()
+	var names: PackedStringArray = []
+	var entry_name := dir.get_next()
+	while entry_name != "":
+		if not dir.current_is_dir() and entry_name.ends_with(".json"):
+			names.append(entry_name)
+		entry_name = dir.get_next()
+	dir.list_dir_end()
+	names.sort()
+	for name in names:
+		_consume_tool_event(TOOL_EVENTS_DIR.path_join(name))
+
+
+func _consume_tool_event(path: String) -> void:
+	var reader := FileAccess.open(path, FileAccess.READ)
+	if reader != null:
+		var text := reader.get_as_text()
+		reader.close()
+		var parsed: Variant = JSON.parse_string(text)
+		if typeof(parsed) == TYPE_DICTIONARY:
+			var kind: Variant = parsed.get("kind")
+			var event_text: Variant = parsed.get("text")
+			if typeof(kind) == TYPE_STRING and not kind.is_empty() and typeof(event_text) == TYPE_STRING:
+				emit_signal("log_line", kind, event_text)
+	_relocate_handled_tool_event(path)
+
+
+func _relocate_handled_tool_event(path: String) -> void:
+	if not DirAccess.dir_exists_absolute(TOOL_EVENTS_HANDLED_DIR):
+		DirAccess.make_dir_recursive_absolute(TOOL_EVENTS_HANDLED_DIR)
+	var dest := TOOL_EVENTS_HANDLED_DIR.path_join(path.get_file())
+	if FileAccess.file_exists(dest):
+		dest = TOOL_EVENTS_HANDLED_DIR.path_join(
+			"%s.%d.json" % [dest.get_basename().get_file(), Time.get_unix_time_from_system()]
+		)
+	DirAccess.rename_absolute(path, dest)
 
 
 func _emit_err(text: String) -> void:
