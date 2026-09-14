@@ -899,6 +899,52 @@ static func run_coordination_validation(current_project_root: String, changed_pa
 ## hermes_session_adapter.py (which MUST be kept in exact sync with this
 ## shape — the adapter validates by exact key match).
 ##
+## Corrected 2026-09-13: process_success (the Hermes CLI subprocess
+## exited 0) and task_success (Hermes itself says the requested edit was
+## completed) are NOT the same fact — live-caught: a real DIRECT_WRITE
+## turn exited 0 while Hermes's own final message explicitly said
+## "TERMINAL_STATUS: BLOCKED" / "STATUS: NOT_COMPLETED" (it had correctly
+## refused, per its own runtime-testing skill's hard boundary, to
+## self-verify a live-reload/viewport outcome the request asked it to
+## prove), and the coordination report still claimed "applied"/DONE with
+## zero files changed, because nothing here ever read Hermes's own
+## status line — exit code 0 was silently treated as task success.
+##
+## Looks for Hermes's own explicit terminal disposition in its response
+## text. Returns {"disposition": "completed" | "not_completed" | "",
+## "detail": String}. "" means NO explicit marker was found — the caller
+## must treat that as "unknown," never as either outcome: the vast
+## majority of turns (ordinary chat, or edits that don't use this
+## reporting convention at all) carry no such line, and process_success
+## alone remains exactly today's existing, safest fallback for those —
+## this function only ever produces a DOWNGRADE (success exit code, but
+## an explicit non-completion claim), never a new path to claiming
+## success on its own.
+static func extract_task_disposition(response_text: String) -> Dictionary:
+	var status_pattern := RegEx.new()
+	status_pattern.compile("(?im)^(?:TERMINAL_STATUS|STATUS)\\s*:\\s*(\\S+)")
+	var found_not_completed := false
+	var found_completed := false
+	for m in status_pattern.search_all(response_text):
+		var value := m.get_string(1).to_upper()
+		if value in ["BLOCKED", "REFUSED", "NOT_COMPLETED", "FAILED"]:
+			found_not_completed = true
+		elif value == "COMPLETED":
+			found_completed = true
+	if not found_not_completed and not found_completed:
+		return {"disposition": "", "detail": ""}
+	if found_not_completed:
+		var blocker_pattern := RegEx.new()
+		blocker_pattern.compile("(?im)^BLOCKER\\s*:\\s*(.+)$")
+		var blocker_match := blocker_pattern.search(response_text)
+		var detail := (
+			blocker_match.get_string(1).strip_edges() if blocker_match
+			else "Hermes reported the task was not completed."
+		)
+		return {"disposition": "not_completed", "detail": detail}
+	return {"disposition": "completed", "detail": ""}
+
+
 ## Split into build (pure) + write (I/O) so a second, additional consumer
 ## of the exact same report (see format_report_for_chatgpt_dragon() below)
 ## can be built from one computation — in particular so
@@ -907,7 +953,13 @@ static func run_coordination_validation(current_project_root: String, changed_pa
 ## behavior/signature; existing callers and tests are unaffected.
 static func build_editor_report(dragon_request: Dictionary, edit_result: Dictionary) -> Dictionary:
 	var message_id := EditReceiptStore.generate_edit_id()
-	var succeeded: bool = edit_result.get("success", false)
+	# See extract_task_disposition()'s own doc for the process_success vs
+	# task_success distinction this corrects.
+	var process_success: bool = edit_result.get("success", false)
+	var disposition := extract_task_disposition(String(edit_result.get("response", "")))
+	var disposition_value := String(disposition.get("disposition", ""))
+	var task_blocked: bool = process_success and disposition_value == "not_completed"
+	var succeeded: bool = process_success and not task_blocked
 	var changes: PackedStringArray = edit_result.get("live_tree_changes", PackedStringArray())
 	var split := _split_live_tree_changes(changes)
 	var files_created: Array = split["created"]
@@ -918,11 +970,17 @@ static func build_editor_report(dragon_request: Dictionary, edit_result: Diction
 	var errors: Array = []
 	var warnings: Array = []
 	var status := "applied" if succeeded else "failed"
-	if not succeeded:
+	if not process_success:
 		errors.append({
 			"code": "TURN_FAILED",
 			"path": null,
 			"message": String(edit_result.get("error", "unknown error")),
+		})
+	elif task_blocked:
+		errors.append({
+			"code": "TASK_NOT_COMPLETED",
+			"path": null,
+			"message": String(disposition.get("detail", "Hermes reported the task was not completed.")),
 		})
 	if succeeded and receipt_state == "ERROR":
 		warnings.append(
@@ -955,6 +1013,10 @@ static func build_editor_report(dragon_request: Dictionary, edit_result: Diction
 		execution_summary = "Created %d file(s), modified %d file(s), deleted %d file(s)." % [
 			files_created.size(), files_modified.size(), files_deleted.size(),
 		]
+	elif task_blocked:
+		execution_summary = "Hermes did not complete the requested edit: %s" % String(
+			disposition.get("detail", "")
+		)
 	else:
 		execution_summary = "Edit turn failed: %s" % String(edit_result.get("error", "unknown error"))
 

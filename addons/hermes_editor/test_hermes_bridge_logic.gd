@@ -37,6 +37,7 @@ func _init() -> void:
 	_check_fingerprint_safety_regressions()
 	_check_end_to_end_fingerprint_audit_against_a_real_repo()
 	_check_coordination_lane()
+	_check_task_disposition_correction()
 
 	if _failures == 0:
 		print("ALL CHECKS PASSED")
@@ -586,3 +587,115 @@ func _check_coordination_lane() -> void:
 		DirAccess.remove_absolute(handled_path)
 	if report_path != "":
 		DirAccess.remove_absolute(report_path)
+
+
+## 2026-09-13 correction: process_success (Hermes CLI exit code) and
+## task_success (Hermes itself says the requested edit completed) are
+## not the same fact — live-caught as load_probe_halo_06: exit 0, zero
+## files changed, yet the report still said "applied" because Hermes's
+## own "TERMINAL_STATUS: BLOCKED" / "STATUS: NOT_COMPLETED" self-report
+## was never read. See extract_task_disposition()/build_editor_report()'s
+## own docs in hermes_bridge.gd.
+func _check_task_disposition_correction() -> void:
+	print("== 2026-09-13 correction: process_success vs task_success ==")
+
+	var dragon_request := {"message_id": "dragonreq_disposition_test"}
+
+	# 1. exit 0 + explicit COMPLETED -> still applied. An explicit
+	#    positive marker is not a new success path; it's a no-op for the
+	#    boolean logic, same outcome as before this correction existed.
+	var completed_result := {
+		"success": true,
+		"response": "REQUEST_ID: probe_01\nTERMINAL_STATUS: COMPLETED\nSTATUS: COMPLETED\n",
+		"live_tree_changes": PackedStringArray(["modified: scripts/DragonAvatar3D.gd"]),
+		"edit_id": "20260913_test_completed",
+		"edit_receipt_state": "AVAILABLE",
+	}
+	var completed_report := HermesBridgeScript.build_editor_report(dragon_request, completed_result)
+	_assert(
+		completed_report.get("status") == "applied",
+		"exit 0 + explicit COMPLETED -> applied: got %s" % [completed_report.get("status")]
+	)
+
+	# 2. exit 0 + explicit BLOCKED/NOT_COMPLETED -> NOT applied, even
+	#    though the process itself exited cleanly and zero files changed
+	#    -- the exact live-caught bug (load_probe_halo_06, 2026-09-13),
+	#    reproduced with Hermes's own real wording.
+	var blocked_result := {
+		"success": true,
+		"response": (
+			"REQUEST_ID: load_probe_halo_06\nTERMINAL_STATUS: BLOCKED\n"
+			+ "BLOCKER: The prerequisite terminal inspection was explicitly denied.\n"
+			+ "STATUS: NOT_COMPLETED\n"
+		),
+		"live_tree_changes": PackedStringArray(),
+	}
+	var blocked_report := HermesBridgeScript.build_editor_report(dragon_request, blocked_result)
+	_assert(
+		blocked_report.get("status") == "failed",
+		"exit 0 + explicit BLOCKED/NOT_COMPLETED -> failed, not applied: got %s" % [blocked_report.get("status")]
+	)
+	_assert(
+		blocked_report.get("files_created") == [] and blocked_report.get("files_modified") == [],
+		"blocked turn still reports honestly empty file lists"
+	)
+	var blocked_errors: Array = blocked_report.get("errors")
+	_assert(
+		blocked_errors.size() == 1 and blocked_errors[0].get("code") == "TASK_NOT_COMPLETED",
+		"blocked turn's error carries the TASK_NOT_COMPLETED code, distinct from TURN_FAILED: got %s" % [blocked_errors]
+	)
+	_assert(
+		String(blocked_errors[0].get("message", "")).contains("terminal inspection was explicitly denied"),
+		"blocked turn's error message carries Hermes's own real BLOCKER text, not a generic string: got %s" % [
+			blocked_errors[0].get("message") if not blocked_errors.is_empty() else "<none>"
+		]
+	)
+
+	# 3. nonzero process exit -> execution failure, exactly as before —
+	#    this correction must not touch process-level failure handling.
+	var process_failed_result := {
+		"success": false,
+		"error": "hermes exited 1: fake failure",
+		"response": "",
+		"live_tree_changes": PackedStringArray(),
+	}
+	var process_failed_report := HermesBridgeScript.build_editor_report(dragon_request, process_failed_result)
+	_assert(
+		process_failed_report.get("status") == "failed",
+		"nonzero process exit -> failed: got %s" % [process_failed_report.get("status")]
+	)
+	var process_failed_errors: Array = process_failed_report.get("errors")
+	_assert(
+		process_failed_errors.size() == 1 and process_failed_errors[0].get("code") == "TURN_FAILED",
+		"process-level failure still carries the original TURN_FAILED code, unaffected by this correction: got %s" % [process_failed_errors]
+	)
+
+	# 4. exit 0, no terminal-status marker at all -> preserve today's
+	#    existing fallback (success-from-exit-code), not a new default.
+	#    The vast majority of real turns never use this reporting
+	#    convention at all and must be completely unaffected.
+	var no_marker_result := {
+		"success": true,
+		"response": "Sure thing -- I created the beacon and hooked it up.",
+		"live_tree_changes": PackedStringArray(["modified: scripts/DragonAvatar3D.gd"]),
+		"edit_id": "20260913_test_no_marker",
+		"edit_receipt_state": "AVAILABLE",
+	}
+	var no_marker_report := HermesBridgeScript.build_editor_report(dragon_request, no_marker_result)
+	_assert(
+		no_marker_report.get("status") == "applied",
+		"exit 0 + no explicit terminal-status marker -> still applied (existing fallback preserved): got %s" % [no_marker_report.get("status")]
+	)
+
+	# Pure unit coverage of the parser itself, independent of
+	# build_editor_report()'s own surrounding logic.
+	var empty_disposition: Dictionary = HermesBridgeScript.extract_task_disposition("just chatting, no status line")
+	_assert(
+		empty_disposition.get("disposition") == "",
+		"no marker in raw text -> empty disposition, not a guess: got %s" % [empty_disposition]
+	)
+	var refused_disposition: Dictionary = HermesBridgeScript.extract_task_disposition("STATUS: REFUSED\nBLOCKER: nope")
+	_assert(
+		refused_disposition.get("disposition") == "not_completed",
+		"REFUSED is recognized as an equivalent explicit non-completion marker, same as BLOCKED: got %s" % [refused_disposition]
+	)
