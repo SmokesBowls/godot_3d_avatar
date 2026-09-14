@@ -1,0 +1,17 @@
+[gd_scene load_steps=3 format=3]
+
+[sub_resource type="StandardMaterial3D" id="Material_hot_magenta_emissive"]
+albedo_color = Color(1, 0.01, 0.55, 1)
+emission_enabled = true
+emission = Color(1, 0, 0.5, 1)
+emission_energy_multiplier = 6.0
+
+[sub_resource type="BoxMesh" id="Mesh_monolith"]
+material = SubResource("Material_hot_magenta_emissive")
+size = Vector3(1, 3, 1)
+
+[node name="VERIFICATION_MONOLITH_04" type="Node3D"]
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="."]
+position = Vector3(0, 1.5, 0)
+mesh = SubResource("Mesh_monolith")

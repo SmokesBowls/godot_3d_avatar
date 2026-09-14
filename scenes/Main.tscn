@@ -3,7 +3,7 @@
 [ext_resource type="PackedScene" uid="uid://dyw2rrveeb13w" path="res://scenes/DragonAvatar3D.tscn" id="1_dragon"]
 [ext_resource type="PackedScene" uid="uid://b1ytp8j8x7g6k" path="res://scenes/ControlHUD.tscn" id="2_hud"]
 [ext_resource type="Script" uid="uid://cf2n754qegumo" path="res://scripts/Main.gd" id="3_main"]
-[ext_resource type="PackedScene" path="res://scenes/FirstLightTower.tscn" id="4_tower"]
+[ext_resource type="PackedScene" path="res://scenes/WorldComposition.tscn" id="9_world_composition"]
 
 [sub_resource type="PlaneMesh" id="PlaneMesh_ground"]
 size = Vector2(20, 20)
@@ -24,10 +24,9 @@ transform = Transform3D(1, 0, 0, 0, 0.965926, 0.258819, 0, -0.258819, 0.965926, 
 mesh = SubResource("PlaneMesh_ground")
 
 [node name="DragonAvatar3D" parent="World" unique_id=1183454696 instance=ExtResource("1_dragon")]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2.193476, 1.2099472, -1.3300718)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.4188087, 1.4589784, -1.3300718)
 
-[node name="FirstLightTower" parent="World" unique_id=1333278874 instance=ExtResource("4_tower")]
-transform = Transform3D(0.65, 0, 0, 0, 0.65, 0, 0, 0, 0.65, -8.5, 0, -8.6)
+[node name="WorldComposition" parent="World" unique_id=771034221 instance=ExtResource("9_world_composition")]
 
 [node name="UI" type="CanvasLayer" parent="." unique_id=636635132]
 

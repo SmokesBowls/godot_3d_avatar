@@ -1,0 +1,28 @@
+[gd_scene load_steps=7 format=3]
+
+[ext_resource type="PackedScene" path="res://scenes/FirstLightTower.tscn" id="1_tower"]
+[ext_resource type="PackedScene" path="res://scenes/ReturnLandingSigil.tscn" id="2_return_sigil"]
+[ext_resource type="PackedScene" path="res://scenes/VerificationMonolith04.tscn" id="3_verification_monolith"]
+[ext_resource type="PackedScene" path="res://scenes/LoadProbeDiamond05.tscn" id="4_load_probe_diamond"]
+[ext_resource type="PackedScene" path="res://scenes/AmberCubeProbe08.tscn" id="5_amber_cube_probe"]
+[ext_resource type="PackedScene" path="res://scenes/VioletCubeProbe11.tscn" id="6_violet_cube_probe"]
+
+[node name="WorldComposition" type="Node3D"]
+
+[node name="FirstLightTower" parent="." instance=ExtResource("1_tower")]
+transform = Transform3D(0.65, 0, 0, 0, 0.65, 0, 0, 0, 0.65, -8.5, 0, -8.6)
+
+[node name="RETURN-01" parent="." instance=ExtResource("2_return_sigil")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 5.5, 0, -4.5)
+
+[node name="VERIFICATION_MONOLITH_04" parent="." instance=ExtResource("3_verification_monolith")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 7.5, 0, -7)
+
+[node name="LOAD_PROBE_DIAMOND_05" parent="." instance=ExtResource("4_load_probe_diamond")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 4.5, 1.5, -1.5)
+
+[node name="AMBER_CUBE_PROBE_08" parent="." instance=ExtResource("5_amber_cube_probe")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -3, 0.6, -1.33)
+
+[node name="VIOLET_CUBE_PROBE_11" parent="." instance=ExtResource("6_violet_cube_probe")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.5, 0.6, -1.33)

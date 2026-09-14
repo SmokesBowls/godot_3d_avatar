@@ -1,0 +1,16 @@
+[gd_scene load_steps=3 format=3]
+
+[sub_resource type="StandardMaterial3D" id="Material_electric_blue_emissive"]
+albedo_color = Color(0.015, 0.35, 1, 1)
+emission_enabled = true
+emission = Color(0.005, 0.2, 1, 1)
+emission_energy_multiplier = 6.0
+
+[sub_resource type="BoxMesh" id="Mesh_azure_cube"]
+material = SubResource("Material_electric_blue_emissive")
+size = Vector3(1.2, 1.2, 1.2)
+
+[node name="AZURE_CUBE_PROBE_09" type="Node3D"]
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="."]
+mesh = SubResource("Mesh_azure_cube")
