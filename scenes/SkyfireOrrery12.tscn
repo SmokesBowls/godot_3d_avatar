@@ -1,0 +1,92 @@
+[gd_scene load_steps=9 format=3]
+
+[sub_resource type="StandardMaterial3D" id="Material_amber_core"]
+albedo_color = Color(1, 0.46, 0.035, 1)
+metallic = 0.15
+roughness = 0.28
+emission_enabled = true
+emission = Color(1, 0.34, 0.015, 1)
+emission_energy_multiplier = 5.0
+
+[sub_resource type="StandardMaterial3D" id="Material_cyan_ring"]
+albedo_color = Color(0.015, 0.72, 0.88, 1)
+metallic = 0.25
+roughness = 0.22
+emission_enabled = true
+emission = Color(0.01, 0.9, 1, 1)
+emission_energy_multiplier = 4.5
+
+[sub_resource type="StandardMaterial3D" id="Material_violet_ring"]
+albedo_color = Color(0.48, 0.08, 0.92, 1)
+metallic = 0.25
+roughness = 0.22
+emission_enabled = true
+emission = Color(0.62, 0.08, 1, 1)
+emission_energy_multiplier = 4.5
+
+[sub_resource type="SphereMesh" id="Mesh_amber_core"]
+material = SubResource("Material_amber_core")
+radius = 0.72
+height = 1.44
+radial_segments = 32
+rings = 20
+
+[sub_resource type="TorusMesh" id="Mesh_cyan_ring"]
+material = SubResource("Material_cyan_ring")
+inner_radius = 1.45
+outer_radius = 1.62
+rings = 64
+ring_segments = 12
+
+[sub_resource type="TorusMesh" id="Mesh_violet_ring"]
+material = SubResource("Material_violet_ring")
+inner_radius = 1.82
+outer_radius = 1.99
+rings = 64
+ring_segments = 12
+
+[sub_resource type="Animation" id="Animation_orrery_motion"]
+resource_name = "orrery_motion"
+length = 12.0
+loop_mode = 1
+tracks/0/type = "value"
+tracks/0/imported = false
+tracks/0/enabled = true
+tracks/0/path = NodePath("CyanRing:rotation")
+tracks/0/interp = 1
+tracks/0/loop_wrap = true
+tracks/0/keys = {"times": PackedFloat32Array(0, 12), "transitions": PackedFloat32Array(1, 1), "update": 0, "values": [Vector3(0.261799, 0, 0), Vector3(0.261799, 6.28319, 0)]}
+tracks/1/type = "value"
+tracks/1/imported = false
+tracks/1/enabled = true
+tracks/1/path = NodePath("VioletRing:rotation")
+tracks/1/interp = 1
+tracks/1/loop_wrap = true
+tracks/1/keys = {"times": PackedFloat32Array(0, 12), "transitions": PackedFloat32Array(1, 1), "update": 0, "values": [Vector3(1.13446, 0, 0.436332), Vector3(1.13446, -12.5664, 0.436332)]}
+tracks/2/type = "value"
+tracks/2/imported = false
+tracks/2/enabled = true
+tracks/2/path = NodePath("AmberCore:scale")
+tracks/2/interp = 2
+tracks/2/loop_wrap = true
+tracks/2/keys = {"times": PackedFloat32Array(0, 3, 6, 9, 12), "transitions": PackedFloat32Array(0.7, 0.7, 0.7, 0.7, 0.7), "update": 0, "values": [Vector3(1, 1, 1), Vector3(1.07, 1.07, 1.07), Vector3(1, 1, 1), Vector3(1.045, 1.045, 1.045), Vector3(1, 1, 1)]}
+
+[sub_resource type="AnimationLibrary" id="AnimationLibrary_orrery"]
+_data = {&"orrery_motion": SubResource("Animation_orrery_motion")}
+
+[node name="SKYFIRE_ORRERY_12" type="Node3D"]
+
+[node name="AmberCore" type="MeshInstance3D" parent="."]
+mesh = SubResource("Mesh_amber_core")
+
+[node name="CyanRing" type="MeshInstance3D" parent="."]
+rotation = Vector3(0.261799, 0, 0)
+mesh = SubResource("Mesh_cyan_ring")
+
+[node name="VioletRing" type="MeshInstance3D" parent="."]
+rotation = Vector3(1.13446, 0, 0.436332)
+mesh = SubResource("Mesh_violet_ring")
+
+[node name="AnimationPlayer" type="AnimationPlayer" parent="."]
+autoplay = &"orrery_motion"
+libraries = {&"": SubResource("AnimationLibrary_orrery")}

@@ -1,4 +1,4 @@
-[gd_scene load_steps=7 format=3]
+[gd_scene load_steps=9 format=3]
 
 [ext_resource type="PackedScene" path="res://scenes/FirstLightTower.tscn" id="1_tower"]
 [ext_resource type="PackedScene" path="res://scenes/ReturnLandingSigil.tscn" id="2_return_sigil"]
@@ -6,6 +6,8 @@
 [ext_resource type="PackedScene" path="res://scenes/LoadProbeDiamond05.tscn" id="4_load_probe_diamond"]
 [ext_resource type="PackedScene" path="res://scenes/AmberCubeProbe08.tscn" id="5_amber_cube_probe"]
 [ext_resource type="PackedScene" path="res://scenes/VioletCubeProbe11.tscn" id="6_violet_cube_probe"]
+[ext_resource type="PackedScene" path="res://scenes/SkyfireOrrery12.tscn" id="7_skyfire_orrery"]
+[ext_resource type="PackedScene" path="res://scenes/DragonSightRig13.tscn" id="8_dragon_sight_rig"]
 
 [node name="WorldComposition" type="Node3D"]
 
@@ -26,3 +28,8 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -3, 0.6, -1.33)
 
 [node name="VIOLET_CUBE_PROBE_11" parent="." instance=ExtResource("6_violet_cube_probe")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.5, 0.6, -1.33)
+
+[node name="SKYFIRE_ORRERY_12" parent="." instance=ExtResource("7_skyfire_orrery")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -4.5, 4.2, -5.5)
+
+[node name="DRAGON_SIGHT_RIG_13" parent="." instance=ExtResource("8_dragon_sight_rig")]

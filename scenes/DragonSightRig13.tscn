@@ -1,0 +1,67 @@
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="Script" path="res://scripts/dragon_sight_rig_13.gd" id="1_dragon_sight"]
+
+[sub_resource type="StyleBoxFlat" id="StyleBox_indicator"]
+bg_color = Color(0.01, 0.055, 0.075, 0.76)
+border_width_left = 1
+border_width_top = 1
+border_width_right = 1
+border_width_bottom = 1
+border_color = Color(0.38, 0.9, 1, 0.58)
+corner_radius_top_left = 4
+corner_radius_top_right = 4
+corner_radius_bottom_right = 4
+corner_radius_bottom_left = 4
+
+[node name="DRAGON_SIGHT_RIG_13" type="Node3D"]
+process_priority = 100
+script = ExtResource("1_dragon_sight")
+
+[node name="DragonSightCamera" type="Camera3D" parent="."]
+current = false
+fov = 78.0
+near = 0.05
+
+[node name="CyanWhiteLight" type="SpotLight3D" parent="DragonSightCamera"]
+visible = false
+light_color = Color(0.72, 0.95, 1, 1)
+light_energy = 1.35
+shadow_enabled = true
+spot_range = 12.0
+spot_angle = 31.0
+spot_angle_attenuation = 1.25
+
+[node name="AmberCenterLight" type="SpotLight3D" parent="DragonSightCamera"]
+visible = false
+light_color = Color(1, 0.48, 0.12, 1)
+light_energy = 0.38
+spot_range = 8.0
+spot_angle = 9.0
+spot_angle_attenuation = 1.6
+
+[node name="DragonSightIndicator" type="CanvasLayer" parent="."]
+visible = false
+layer = 20
+
+[node name="IndicatorPanel" type="PanelContainer" parent="DragonSightIndicator"]
+anchors_preset = 1
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -188.0
+offset_top = 24.0
+offset_right = -24.0
+offset_bottom = 62.0
+grow_horizontal = 0
+mouse_filter = 2
+theme_override_styles/panel = SubResource("StyleBox_indicator")
+
+[node name="Label" type="Label" parent="DragonSightIndicator/IndicatorPanel"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.78, 0.97, 1, 0.92)
+theme_override_colors/font_shadow_color = Color(1, 0.42, 0.08, 0.35)
+theme_override_constants/outline_size = 1
+theme_override_font_sizes/font_size = 14
+text = "DRAGON SIGHT"
+horizontal_alignment = 1
+vertical_alignment = 1
